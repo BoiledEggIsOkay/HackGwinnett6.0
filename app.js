@@ -52,6 +52,7 @@ const dialog = $('#settings-dialog');
 let careToolsReady = false;
 let voiceEpoch = 0;
 let transcriptTimer;
+const localFileMode = window.location.protocol === 'file:';
 function toast(text) {
   $('#toast').textContent = text;
   $('#toast').style.display = 'block';
@@ -252,7 +253,7 @@ $('#chat-form').onsubmit = event => {
 };
 document.querySelectorAll('.suggestions button').forEach(button => { button.onclick = () => chat(button.textContent); });
 
-const voiceHelpText = 'Voice assistance understands several ways to ask for a section, explain notes, find specialist resources, or manage your checklist. Listening pauses during spoken replies. Use the Interrupt button to stop a reply. With wake listening enabled, say voice assistant on to enable assistance. While off, all other commands are ignored.';
+const voiceHelpText = 'Voice assistance understands several ways to ask for a section, explain notes, find specialist resources, or manage your checklist. Voice input is ignored during spoken replies while the microphone stays active. Use the Interrupt button to stop a reply. With wake listening enabled, say voice assistant on to enable assistance. While off, all other commands are ignored.';
 function voiceHelp() {
   modal('What would you like to do?', `
     <p>Start voice assistance when you want help, then speak while it is listening. Use the Interrupt button to stop a spoken reply and resume listening.</p>
@@ -268,7 +269,7 @@ function voiceHelp() {
       <li>“Read this page,” “notifications,” “our promise,” “close dialog”</li>
       <li>“Prepare my checklist,” “download my care plan,” or “track my symptoms”</li><li>“Cancel,” “turn off voice assistant,” or “voice assistant on” (with wake listening enabled)</li>
     </ul>
-    <p class="fine-print">Allow microphone access when your browser asks. Your browser’s speech service may process audio. The microphone pauses during spoken replies to avoid hearing its own voice. Quiet surroundings and headphones can improve recognition. Unrelated speech and low-confidence recognition are ignored. Uploading a file uses the file chooser; you can dictate notes instead.</p>`);
+    <p class="fine-print">Run the site through localhost or HTTPS, then allow microphone access when your browser asks. Your browser’s speech service may process audio. The microphone stays active during spoken replies, but their recognized text is ignored. Quiet surroundings and headphones can improve recognition. Unrelated speech and low-confidence recognition are ignored. Uploading a file uses the file chooser; you can dictate notes instead.</p>`);
   speak(voiceHelpText);
 }
 $('#voice-help').onclick = voiceHelp;
@@ -310,7 +311,7 @@ async function chooseSpecialty(text) {
   return true;
 }
 function promptForPage(page) {
-  if (!voice?.enabled) return;
+  if (!voice?.enabled || localFileMode) return;
   if (page === 'decoder') { $('#medical-text').focus(); ask('notes', 'What medical notes or lab results would you like explained? Say or paste the text, then review it before sending.'); }
   else if (page === 'specialists') { $('#specialist-search').focus(); ask('specialty', 'What condition or type of specialist would you like to search for? Say or type it, then verify your search.'); }
   else if (page === 'assistant') { $('#chat-input').focus(); ask('chat', 'What prompt would you like to send to your care assistant? Say or type your question. I will ask you to verify it before sending.'); }
@@ -620,7 +621,8 @@ async function receiveVoiceTranscript(text, metadata = {}) {
   }
 }
 const stateLabels = {
-  listening: 'Listening for your command', speaking: 'Speaking · microphone paused',
+  listening: 'Listening for your command', speaking: 'Speaking · voice input paused',
+  resuming: 'Voice input resumes shortly',
   starting: 'Starting microphone…', paused: 'Microphone paused',
   standby: 'Voice assistance off · wake phrase only', off: 'Voice assistance off',
   unavailable: 'Voice input unavailable', permission: 'Microphone permission needed'
@@ -636,19 +638,19 @@ function updateVoiceState(state, detail) {
   else if (state === 'off') $('#voice-hint').textContent = 'Choose Voice assistance to start. Your microphone is off.';
   else if (state === 'standby') $('#voice-hint').textContent = 'Only “voice assistant on” can activate assistance. Other speech is ignored.';
   else if (state === 'permission') $('#voice-hint').textContent = 'Allow microphone access in your browser, then choose Retry microphone.';
-  $('#voice-retry').hidden = !(['permission', 'paused'].includes(state) || (state === 'unavailable' && voice?.supported));
+  $('#voice-retry').hidden = localFileMode || !(['permission', 'paused'].includes(state) || (state === 'unavailable' && voice?.supported));
 }
-function setWakeListening(enabled) {
+function setWakeListening(enabled, options) {
   save('voice-wake-enabled', enabled);
   $('#voice-wake').checked = enabled;
   if (dialog.open && $('#wake-setting')) $('#wake-setting').checked = enabled;
-  voice.setWakeListening(enabled);
+  if (enabled !== voice.wakeListening) voice.setWakeListening(enabled, options);
 }
 function setVoiceEnabled(enabled) {
   voiceEpoch++;
   clearTranscript();
   save('voice-enabled', enabled);
-  if (enabled) voice.enable();
+  if (enabled) { if (!voice.enabled) voice.enable(); }
   else { cancelInput(); voice.disable(); }
   if (dialog.open && $('#tts')) $('#tts').checked = enabled;
 }
@@ -663,7 +665,7 @@ voice = window.CareVoice.create({
 applyPreferences();
 $('#voice').onclick = () => {
   setVoiceEnabled(!voice.enabled);
-  if (voice.enabled) { $('#voice-hint').textContent = 'Voice assistance enabled. Say what you would like to do.'; promptForPage(currentPage); }
+  if (voice.enabled && !localFileMode) { $('#voice-hint').textContent = 'Voice assistance enabled. Say what you would like to do.'; promptForPage(currentPage); }
 };
 $('#voice-wake').onchange = event => setWakeListening(event.target.checked);
 $('#voice-interrupt').onclick = () => {
@@ -676,11 +678,15 @@ $('#voice-retry').onclick = () => {
   else if (voice.wakeListening) voice.setWakeListening(true);
   else setVoiceEnabled(true);
 };
-// A first visit is quiet and does not request microphone access. Saved explicit
-// opt-ins can resume listening; no greeting or response plays at startup.
+// A first visit is quiet. Saved opt-ins resume only an existing saved grant;
+// a reload must never trigger another permission request.
 voice.disable();
-setWakeListening(load('voice-wake-enabled', false, value => typeof value === 'boolean'));
-if (load('voice-enabled', false, value => typeof value === 'boolean')) voice.enable();
+$('#voice-file-help').hidden = !localFileMode;
+$('#voice-wake').disabled = localFileMode;
+if (!localFileMode) {
+  setWakeListening(load('voice-wake-enabled', false, value => typeof value === 'boolean'), { requestPermission: false });
+  if (load('voice-enabled', false, value => typeof value === 'boolean')) voice.enable({ requestPermission: false });
+}
 
 function reviewInput(config) {
   const field = typeof config.field === 'string' ? $(config.field) : config.field;

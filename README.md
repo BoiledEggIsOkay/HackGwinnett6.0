@@ -25,11 +25,16 @@ On your Mac, use the path where you downloaded or cloned this folder instead of
 `/Workshop/HackGwinnett6.0`. Open **http://localhost:3000** in Chrome or Edge.
 There are no application dependencies to install.
 
+Opening `index.html` directly uses a `file://` address. Browsers can ask for
+microphone permission again for each new recognition session on local files.
+Voice input is disabled in that mode to prevent repeated permission dialogs;
+run `npm start` and open the localhost address above to use it.
+
 Keep the whole project folder together, including all JavaScript modules.
 Opening an HTML-only copy or a preview that does not serve the other files
 will lose the formatting and scripts. If you see an unformatted white page,
 confirm you are visiting the localhost URL, restart the server, and refresh
-with **Command + Shift + R** on a Mac. In Chrome's Network panel, `style.css?v=4`
+with **Command + Shift + R** on a Mac. In Chrome's Network panel, `style.css?v=5`
 should return `200` with a `text/css` content type.
 
 The stylesheet uses local system fonts and needs no Google Fonts request.
@@ -50,12 +55,17 @@ care information while voice assistance is enabled. Say **confirm**, **send**,
 or **save** to continue, **change** to edit, or **cancel** to discard the action.
 The visible confirmation controls also work without speaking.
 
-The app reuses its recognition setup and checks microphone permission when the
-browser exposes that information. It does not ask for a separate audio stream.
-A browser can still require permission per session or visit. To avoid repeated
-prompts, serve over **HTTPS** or **localhost** and choose a persistent microphone
-permission in the browser's site settings when that option is available. If
-access is denied, allow it in site settings and choose **Retry microphone**.
+The app keeps an approved recognition session open through spoken replies
+instead of requesting a new microphone session after every response. It checks
+saved permission without opening a separate audio stream. If recognition ends,
+it reconnects automatically only when the browser reports a saved grant.
+Temporary or unsupported permission status pauses capture until you choose
+**Retry microphone**, preventing automatic permission-request loops. Saved
+voice preferences also resume capture on later visits only with a saved grant.
+
+Use **HTTPS** or **localhost** and choose a persistent microphone permission in
+the browser's site settings when offered. If access is denied, allow it there,
+then choose **Retry microphone**.
 
 **Listen for “voice assistant on”** is separate and optional. While voice is
 off, it uses the microphone only to recognize a wake phrase and ignores other
@@ -75,12 +85,14 @@ Examples:
 | “Settings” / “larger text on” | Opens or updates accessibility preferences |
 | “Turn off voice assistant” | Stops normal commands and spoken responses |
 
-Listening pauses during spoken replies to prevent self-transcription, then
-resumes after a short cooldown. Use **Interrupt / give a command** to stop a
-reply. Recognition confidence and relevance checks filter unrelated discussion,
-and transcripts clear between commands. Background filtering is best effort;
-browser speech recognition cannot reliably separate nearby speakers or guarantee
-acoustic noise cancellation. A quiet room or headset can help.
+Voice input is ignored during spoken replies and a short cooldown to prevent
+self-transcription. The microphone stays active through those replies so the
+approved session can continue. Turn off both voice assistance and wake listening
+to release it. Use **Interrupt / give a command** to stop a reply. Recognition
+confidence and relevance checks filter unrelated discussion, and transcripts
+clear between commands. Background filtering is best effort; browser speech
+recognition cannot reliably separate nearby speakers or guarantee acoustic
+noise cancellation. A quiet room or headset can help.
 
 Settings include voice selection and speaking speed, dark mode, larger text,
 high contrast, a reading layout for dyslexia, and reduced motion. Available

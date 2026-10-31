@@ -101,7 +101,7 @@ function browser(options = {}) {
     SpeechSynthesisUtterance: options.synthesis === false ? undefined : Utterance,
     isSecureContext: options.secure !== false,
     navigator: { language: 'en-US', userActivation: { hasBeenActive: options.activated !== false, isActive: options.activated !== false } },
-    location: { protocol: 'http:', hostname: 'localhost' },
+    location: { protocol: options.protocol || 'http:', hostname: options.hostname ?? 'localhost' },
     setTimeout: schedule,
     clearTimeout: id => timers.delete(id),
     addEventListener(type, handler) { listeners.set(type, handler); },
@@ -191,10 +191,10 @@ test('starts silent with no microphone access until explicitly enabled', () => {
   assert.equal(b.synthesis.utterances.length, 0);
 });
 
-test('restarts after recognition ends without enabling interim results', () => {
-  const b = browser();
+test('restarts a granted session after recognition ends without enabling interim results', async () => {
+  const b = browser({ permissionState: 'granted' });
   b.engine.enable();
-  b.advance();
+  await b.permissionsReady();
   assert.equal(b.instances.at(-1).continuous, true);
   assert.equal(b.instances.at(-1).interimResults, false);
   b.end();
@@ -220,7 +220,7 @@ test('disabling fully releases microphone and prevents recognition restarting', 
   assert.ok(b.synthesis.cancels > 0);
 });
 
-test('pauses microphone while speaking, ignores stale results, and resumes after cooldown', () => {
+test('keeps the approved microphone session open and consumes ignored speech and cooldown results', () => {
   const b = browser();
   b.engine.enable();
   b.advance();
@@ -229,20 +229,25 @@ test('pauses microphone while speaking, ignores stale results, and resumes after
   b.advance();
   assert.equal(b.engine.speaking, true);
   assert.equal(b.engine.listening, false);
-  assert.equal(oldSession.aborts, 1);
+  assert.equal(oldSession.aborts, 0);
+  assert.equal(oldSession.active, true, 'Read-aloud must not discard the approved native session');
   b.emit('open medical decoder');
-  b.emit('Your care plan includes a checklist for your next appointment.');
+  b.emit('Your care plan includes a checklist for your next appointment.', { index: 1 });
   assert.deepEqual(b.transcripts, []);
   b.finishSpeech();
+  b.emit('open my care plan', { index: 2 });
   b.advance(599);
   assert.equal(b.engine.listening, false);
   b.advance(1);
   assert.equal(b.engine.listening, true);
   assert.equal(b.instances.at(-1), oldSession);
-  assert.equal(oldSession.starts, 2);
-  b.emit('Your care plan includes a checklist for your next appointment.');
+  assert.equal(oldSession.starts, 1, 'Finishing a reply must not request native capture again');
+  b.emit('open medical decoder');
+  b.emit('Your care plan includes a checklist for your next appointment.', { index: 1 });
+  b.emit('open my care plan', { index: 2 });
+  b.emit('Your care plan includes a checklist for your next appointment.', { index: 3 });
   assert.deepEqual(b.transcripts, []);
-  b.emit('open medical decoder', { index: 1 });
+  b.emit('open medical decoder', { index: 4 });
   assert.deepEqual(b.transcripts, ['open medical decoder']);
 });
 
@@ -361,10 +366,10 @@ test('wake standby permission denial also stops retries', () => {
   assert.ok(b.states.some(({ state }) => state === 'permission'));
 });
 
-test('repeated network failures eventually stop retrying', () => {
-  const b = browser();
+test('repeated network failures on a granted session eventually stop retrying', async () => {
+  const b = browser({ permissionState: 'granted' });
   b.engine.enable();
-  b.advance();
+  await b.permissionsReady();
   for (let i = 0; i < 12; i++) {
     b.error('network');
     b.end();
@@ -626,6 +631,96 @@ test('revoking saved permission stops capture without retrying in the background
   assert.equal(b.engine.listening, false);
   assert.equal(b.starts, 1);
   assert.ok(b.states.some(({ state }) => state === 'permission'));
+});
+
+test('local files never request microphone access even when reported as a secure context', async () => {
+  const b = browser({ protocol: 'file:', hostname: '', permissionState: 'granted' });
+  b.engine.enable();
+  b.engine.setWakeListening(true);
+  await b.permissionsReady();
+  b.engine.speak('Written controls remain available.');
+  b.advance();
+  b.finishSpeech();
+  b.advance(60000);
+  b.engine.interrupt();
+  b.engine.disable();
+  b.engine.enable();
+  await b.permissionsReady();
+  assert.equal(b.instances.length, 0);
+  assert.equal(b.permissionQueries, 0);
+  assert.equal(b.microphoneRequests, 0);
+  assert.equal(b.engine.listening, false);
+  assert.ok(b.errors.some(({ code, message }) => code === 'file-origin' && /localhost:3000/.test(message)));
+});
+
+test('temporary and unsupported grants never cause automatic native permission retries', async () => {
+  for (const permissionUnsupported of [false, true]) {
+    const b = browser({ permissionState: 'prompt', permissionUnsupported });
+    b.engine.enable();
+    await b.permissionsReady();
+    for (const text of ['Check your prompt.', 'Please verify it.', 'Your question is ready.']) {
+      b.engine.speak(text);
+      b.advance();
+      b.finishSpeech();
+      b.advance(600);
+    }
+    assert.equal(b.starts, 1, 'Replies keep even a temporary native grant alive');
+    assert.equal(b.engine.listening, true);
+    b.end();
+    b.advance(60000);
+    assert.equal(b.starts, 1, 'A browser end must not start another permission dialog');
+    assert.equal(b.engine.listening, false);
+    assert.ok(b.states.some(({ state, detail }) => state === 'paused' && /Retry microphone/.test(detail)));
+    b.engine.enable();
+    b.advance();
+    assert.equal(b.starts, 2, 'Explicit Retry may request one new native session');
+    b.end();
+    b.advance(60000);
+    assert.equal(b.starts, 2);
+    assert.equal(b.microphoneRequests, 0);
+  }
+});
+
+test('restoring saved voice and wake preferences starts only an existing granted permission', async () => {
+  for (const permissionState of ['granted', 'prompt']) {
+    const b = browser({ permissionState });
+    b.engine.setWakeListening(true, { requestPermission: false });
+    b.engine.enable({ requestPermission: false });
+    await b.permissionsReady();
+    assert.equal(b.starts, permissionState === 'granted' ? 1 : 0);
+    if (permissionState === 'prompt') {
+      b.advance(60000);
+      assert.equal(b.starts, 0);
+      b.engine.enable();
+      b.advance();
+      assert.equal(b.starts, 1);
+    }
+  }
+  const unknown = browser();
+  unknown.engine.enable({ requestPermission: false });
+  unknown.advance(60000);
+  assert.equal(unknown.starts, 0, 'Missing Permissions API is not evidence of a saved grant');
+  unknown.engine.interrupt();
+  unknown.advance();
+  assert.equal(unknown.starts, 1);
+});
+
+test('late finals from speech begun during read-aloud cannot become commands', () => {
+  const b = browser();
+  b.engine.enable();
+  b.advance();
+  const recognition = b.instances.at(-1);
+  b.engine.speak('Please verify your care assistant prompt.');
+  b.advance();
+  recognition.onspeechstart();
+  b.finishSpeech();
+  b.advance(600);
+  b.emit('open care assistant');
+  assert.deepEqual(b.transcripts, []);
+  recognition.onspeechstart();
+  b.emit('open my care plan', { index: 1 });
+  assert.deepEqual(b.transcripts, ['open my care plan']);
+  assert.equal(b.starts, 1);
 });
 
 test('selected browser voice and speech rate apply to new utterances with a safe fallback', () => {

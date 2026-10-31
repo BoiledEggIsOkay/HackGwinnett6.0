@@ -2,10 +2,12 @@
 // CARE_COMPASS_PLAYWRIGHT=/path/to/node_modules/playwright npm run test:browser
 const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
+const path = require('node:path');
+const { pathToFileURL } = require('node:url');
 const { startServer } = require('./server-helper.cjs');
 const { chromium } = require(process.env.CARE_COMPASS_PLAYWRIGHT || 'playwright');
 
-function mockBrowserSpeech() {
+function mockBrowserSpeech(configuration = {}) {
   const instances = [];
   const spoken = [];
   let speech = null;
@@ -14,9 +16,13 @@ function mockBrowserSpeech() {
   let starts = 0;
   let permissionQueries = 0;
   const utterances = [];
-  const permission = { state: 'granted', addEventListener() {}, removeEventListener() {} };
+  const permission = { state: configuration.permissionState || 'granted', addEventListener() {}, removeEventListener() {} };
   Object.defineProperty(navigator, 'permissions', {
-    value: { query: async () => { permissionQueries++; return permission; } }, configurable: true
+    value: { query: async () => {
+      permissionQueries++;
+      if (configuration.permissionUnsupported) throw new TypeError('Microphone permission descriptor is unsupported');
+      return permission;
+    } }, configurable: true
   });
   class Recognition {
     constructor() {
@@ -79,6 +85,16 @@ function mockBrowserSpeech() {
     get cancels() { return cancels; },
     get starts() { return starts; },
     get permissionQueries() { return permissionQueries; },
+    end() {
+      const recognition = instances.at(-1);
+      if (!recognition) return;
+      recognition.active = false;
+      recognition.onend?.();
+    },
+    replay() {
+      const recognition = instances.at(-1);
+      recognition?.onresult?.({ resultIndex: 0, results: recognition.results });
+    },
     emit(text, { final = true, confidence = 1 } = {}) {
       const recognition = instances.at(-1);
       if (!recognition) return;
@@ -92,7 +108,8 @@ function mockBrowserSpeech() {
 }
 
 async function waitListening(page) {
-  await page.waitForFunction(() => window.__mockVoice.active && !window.speechSynthesis.speaking);
+  await page.waitForFunction(() => window.__mockVoice.active && !window.speechSynthesis.speaking &&
+    ['listening', 'standby'].includes(document.querySelector('#voice').dataset.state));
 }
 async function speak(page, text, options = {}) {
   await waitListening(page);
@@ -323,6 +340,7 @@ async function run() {
     await waitListening(page);
     assert.equal(await page.evaluate(() => window.__mockVoice.instances.length), 1, 'Toggles must reuse one native recognizer');
     assert.equal(await page.evaluate(() => window.__mockVoice.permissionQueries), 1, 'Saved microphone permission should be checked once');
+    const startsBeforeReplies = await page.evaluate(() => window.__mockVoice.starts);
 
     await page.locator('#accessibility').click();
     await page.locator('#voice-preview').click();
@@ -483,8 +501,8 @@ async function run() {
     await page.locator('#read-responses').check();
     await page.locator('#save-access').click();
 
-    // No result from the old recognition session can execute while read-aloud
-    // is active. The explicit Interrupt control resumes capture immediately.
+    // Read-aloud keeps the approved native session open, while the app ignores
+    // voice input. Interrupt resumes input without requesting another session.
     await page.locator('#chat-input').fill('What is POTS?');
     await page.locator('#chat-form button').click();
     await reviewReady(page, /POTS/i);
@@ -493,13 +511,16 @@ async function run() {
     await page.locator('#review-confirm').click();
     await page.locator('#review-dialog').waitFor({ state: 'hidden' });
     await page.waitForFunction(() => window.speechSynthesis.speaking);
-    assert.equal(await page.evaluate(() => window.__mockVoice.active), false);
+    assert.equal(await page.evaluate(() => window.__mockVoice.active), true, 'Read-aloud must preserve the already approved microphone session');
+    assert.equal(await page.evaluate(() => window.__mockVoice.starts), startsBeforeReplies, 'Repeated spoken replies must not call native microphone start again');
     const duringSpeechPage = await activePage(page);
     await page.evaluate(() => window.__mockVoice.emit(window.__mockVoice.spoken.at(-1)));
     await page.evaluate(() => window.__mockVoice.emit('open medical decoder'));
     assert.equal(await activePage(page), duringSpeechPage);
     await page.locator('#voice-interrupt').click();
     await waitListening(page);
+    await page.evaluate(() => window.__mockVoice.replay());
+    assert.equal(await activePage(page), duringSpeechPage, 'Results suppressed during read-aloud must remain suppressed if replayed');
     await page.evaluate(() => { window.__speechDuration = 25; });
     await speak(page, 'open medical decoder');
     assert.equal(await activePage(page), 'decoder');
@@ -509,6 +530,7 @@ async function run() {
     await speak(page, 'go to overview', { final: false });
     assert.equal(await activePage(page), 'decoder');
     await speak(page, 'cancel');
+    assert.equal(await page.evaluate(() => window.__mockVoice.starts), startsBeforeReplies, 'Input prompts, confirmations, and interruptions must share the approved session');
     await speak(page, 'turn off voice assistant');
     assert.equal(await page.locator('#voice').getAttribute('aria-pressed'), 'false');
     assert.equal(await page.evaluate(() => window.__mockVoice.active), false);
@@ -597,6 +619,66 @@ async function run() {
     assert.deepEqual(deniedErrors, []);
     await deniedContext.close();
 
+    // Local files may be secure contexts but lack persistent origin grants.
+    // They must show setup guidance without ever asking for microphone access.
+    const fileContext = await browser.newContext();
+    await fileContext.addInitScript(mockBrowserSpeech);
+    const filePage = await fileContext.newPage();
+    const fileErrors = [];
+    filePage.on('pageerror', error => fileErrors.push(error.message));
+    await filePage.goto(pathToFileURL(path.join(__dirname, '../index.html')).href);
+    assert.equal(await filePage.evaluate(() => location.protocol), 'file:');
+    await filePage.locator('#voice').click();
+    await filePage.waitForFunction(() => /localhost|local server/i.test(document.querySelector('#voice-hint').textContent));
+    assert.equal(await filePage.locator('#voice-wake').isDisabled(), true, 'File-page wake listening must be unavailable');
+    assert.equal(await filePage.locator('#voice-file-help').isVisible(), true);
+    await filePage.locator('[data-page="assistant"]').click();
+    await filePage.locator('#voice-help').click();
+    await filePage.waitForFunction(() => window.__mockVoice.spoken.length > 0);
+    assert.equal(await filePage.evaluate(() => window.__mockVoice.starts), 0, 'File pages must never start native microphone capture');
+    assert.equal(await filePage.evaluate(() => window.__mockVoice.permissionQueries), 0, 'File pages must not query or request microphone access');
+    await filePage.reload();
+    await filePage.waitForFunction(() => document.querySelector('#voice').dataset.state === 'off');
+    assert.equal(await filePage.locator('#voice-file-help').isVisible(), true);
+    assert.equal(await filePage.evaluate(() => window.__mockVoice.starts), 0, 'Saved file-page opt-ins must not create a permission loop on reload');
+    assert.deepEqual(fileErrors, []);
+    await fileContext.close();
+
+    // A temporary grant or unsupported permission query must not cause an
+    // automatic series of native starts after capture ends or the page reloads.
+    for (const configuration of [{ permissionState: 'prompt' }, { permissionUnsupported: true }]) {
+      const temporaryContext = await browser.newContext();
+      await temporaryContext.addInitScript(mockBrowserSpeech, configuration);
+      const temporaryPage = await temporaryContext.newPage();
+      const temporaryErrors = [];
+      temporaryPage.on('pageerror', error => temporaryErrors.push(error.message));
+      await temporaryPage.goto(server.baseURL);
+      await temporaryPage.locator('#voice').click();
+      await waitListening(temporaryPage);
+      assert.equal(await temporaryPage.evaluate(() => window.__mockVoice.starts), 1);
+      await temporaryPage.evaluate(() => window.__mockVoice.end());
+      await temporaryPage.waitForFunction(() => document.querySelector('#voice').dataset.state === 'paused');
+      await temporaryPage.waitForTimeout(1000);
+      assert.equal(await temporaryPage.evaluate(() => window.__mockVoice.starts), 1, 'Temporary permission must wait for an explicit Retry rather than automatically prompt again');
+      assert.equal(await temporaryPage.locator('#voice-retry').isVisible(), true);
+      await temporaryPage.locator('#accessibility').click();
+      await temporaryPage.locator('#theme-choice').selectOption('dark');
+      await temporaryPage.locator('#save-access').click();
+      assert.equal(await temporaryPage.evaluate(() => window.__mockVoice.starts), 1, 'Saving appearance must not restart paused microphone capture');
+      assert.equal(await temporaryPage.locator('#voice').getAttribute('data-state'), 'paused');
+      await temporaryPage.locator('#voice-retry').click();
+      await waitListening(temporaryPage);
+      assert.equal(await temporaryPage.evaluate(() => window.__mockVoice.starts), 2, 'Explicit Retry may start one new native session');
+      await temporaryPage.reload();
+      await temporaryPage.waitForFunction(() => document.querySelector('#voice').dataset.state === 'paused');
+      assert.equal(await temporaryPage.evaluate(() => window.__mockVoice.starts), 0, 'Remembered opt-ins must not request a temporary permission on reload');
+      await temporaryPage.locator('#voice-retry').click();
+      await waitListening(temporaryPage);
+      assert.equal(await temporaryPage.evaluate(() => window.__mockVoice.starts), 1);
+      assert.deepEqual(temporaryErrors, []);
+      await temporaryContext.close();
+    }
+
     const storageContext = await browser.newContext();
     await storageContext.addInitScript(mockBrowserSpeech);
     await storageContext.addInitScript(() => {
@@ -613,7 +695,7 @@ async function run() {
     assert.match(await storagePage.locator('#checklist').textContent(), /Still works without storage/);
     assert.deepEqual(storageErrors, []);
     await storageContext.close();
-    console.log('Chromium smoke passed: quiet startup, automatic/local AI, decoder/files, broad specialist search, checklist/symptoms/export, settings persistence, policies/data reset, confirmed voice/typed input, recognizer reuse, voice/wake/noise/echo, permission handling, blocked storage, and responsive layouts.');
+    console.log('Chromium smoke passed: quiet startup, automatic/local AI, decoder/files, broad specialist search, checklist/symptoms/export, settings persistence, policies/data reset, confirmed voice/typed input, one approved session across speech, voice/wake/noise/echo, file/temporary-permission loop prevention, blocked storage, and responsive layouts.');
   } finally {
     await browser?.close();
     await server.close();
