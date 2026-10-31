@@ -34,7 +34,7 @@ Keep the whole project folder together, including all JavaScript modules.
 Opening an HTML-only copy or a preview that does not serve the other files
 will lose the formatting and scripts. If you see an unformatted white page,
 confirm you are visiting the localhost URL, restart the server, and refresh
-with **Command + Shift + R** on a Mac. In Chrome's Network panel, `style.css?v=7`
+with **Command + Shift + R** on a Mac. In Chrome's Network panel, `style.css?v=8`
 should return `200` with a `text/css` content type.
 
 The stylesheet uses local system fonts and needs no Google Fonts request.
@@ -100,7 +100,31 @@ voices depend on your browser and device. The app saves preferences locally.
 Speech recognition varies by browser and generally requires an internet
 connection; audio may be processed by the browser's recognition provider.
 
-## Automatic AI connection
+## GitHub Pages with Render AI
+
+The website stays at
+**https://boiledeggisokay.github.io/HackGwinnett6.0/** and sends AI requests to
+**https://hackgwinnett6-0.onrender.com**. GitHub Pages serves the website files;
+Render runs `server.js` and keeps the provider key in its environment.
+
+1. Connect the repository to a Render **Web Service**. Leave Root Directory
+   blank, use `npm install` as the build command, and `npm start` as the start
+   command. Enable automatic deployments for the same branch as GitHub Pages.
+2. Set `OPENAI_API_KEY` privately in the Render service's **Environment**
+   settings and deploy. Keep the key out of GitHub and browser files.
+3. Commit and push the project changes, then wait for both GitHub Pages and
+   Render to finish deploying.
+4. Open the GitHub Pages URL and refresh. AI connects automatically unless you
+   previously switched it off; choose **Use connected AI** to enable it again.
+   **Check connection** retries if the server is temporarily unavailable.
+
+Both public addresses are in `site-config.js`. Update that file if either
+deployment moves. The browser uses Render only from this GitHub Pages project;
+visits to Render or localhost use their own server. The AI routes allow the
+configured GitHub Pages origin and same-origin requests, including the browser's
+preflight check. Other website origins are rejected.
+
+## Automatic AI connection for local use
 
 The server loads an ignored `.env` file automatically when it starts. Add a
 server API key once:
@@ -136,7 +160,9 @@ by the browser's speech service and is not sent to this AI endpoint.
 The server uses the Responses API with structured output and `store: false`.
 It does not save or log submitted medical text. Provider processing still
 applies; `store: false` is not a promise of zero provider retention. Requests
-have size limits, timeouts, rate limits, and browser origin checks.
+have size limits, timeouts, rate limits, and browser origin checks. On GitHub
+Pages, submitted AI input passes through the configured Render server; profile,
+checklist, and settings storage stays in the GitHub Pages browser origin.
 
 Implementation references:
 
@@ -204,6 +230,7 @@ npm run test:browser
 npm run test:browser:ai
 npm run test:browser:assistant
 npm run test:browser:ai-connection
+npm run test:browser:pages-ai
 ```
 
 If Playwright is installed outside this project, set `CARE_COMPASS_PLAYWRIGHT`

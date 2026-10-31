@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const http = require('node:http');
 const { once } = require('node:events');
 const { startServer } = require('./server-helper.cjs');
+const { pagesOrigin } = require('../site-config.js');
 
 let app;
 let upstream;
@@ -67,6 +68,150 @@ test('AI guidance uses Responses structured output without storing the response'
   });
 });
 
+test('GitHub Pages can read availability with an exact CORS origin and no secret exposure', async () => {
+  const before = calls;
+  for (const method of ['GET', 'HEAD']) {
+    const response = await fetch(`${app.baseURL}/api/ai/status`, {
+      method, headers: { Origin: pagesOrigin, 'Sec-Fetch-Site': 'cross-site' }
+    });
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get('access-control-allow-origin'), pagesOrigin);
+    assert.equal(response.headers.get('vary'), 'Origin');
+    assert.equal(response.headers.get('access-control-allow-credentials'), null);
+    assert.doesNotMatch(JSON.stringify([...response.headers]), /test-only-key|Bearer|\/v1\/responses/);
+    if (method === 'GET') assert.deepEqual(await response.json(), { available: true });
+    else assert.equal(await response.text(), '');
+  }
+  assert.equal(calls, before, 'Checking availability does not call the provider');
+  const asset = await fetch(`${app.baseURL}/site-config.js`, { headers: { Origin: pagesOrigin } });
+  assert.equal(asset.status, 200);
+  assert.equal(asset.headers.get('access-control-allow-origin'), null, 'CORS applies only to AI endpoints');
+});
+
+test('valid GitHub Pages preflights allow only each endpoint method and Content-Type', async () => {
+  const before = calls;
+  for (const [pathname, method] of [['/api/ai/status', 'GET'], ['/api/ai/status', 'HEAD'], ['/api/ai', 'POST']]) {
+    const response = await fetch(`${app.baseURL}${pathname}`, {
+      method: 'OPTIONS',
+      headers: {
+        Origin: pagesOrigin, 'Sec-Fetch-Site': 'cross-site',
+        'Access-Control-Request-Method': method,
+        'Access-Control-Request-Headers': 'content-type'
+      }
+    });
+    assert.equal(response.status, 204);
+    assert.equal(await response.text(), '');
+    assert.equal(response.headers.get('access-control-allow-origin'), pagesOrigin);
+    assert.equal(response.headers.get('vary'), 'Origin');
+    const allowed = response.headers.get('access-control-allow-methods').split(', ');
+    assert.ok(allowed.includes(method));
+    assert.ok(allowed.includes('OPTIONS'));
+    assert.ok(!allowed.includes(pathname.endsWith('/status') ? 'POST' : 'GET'));
+    assert.equal(response.headers.get('access-control-allow-headers').toLowerCase(), 'content-type');
+    assert.doesNotMatch(JSON.stringify([...response.headers]), /\*|test-only-key|Bearer/);
+  }
+  assert.equal(calls, before, 'Preflights do not submit prompts or use the provider');
+});
+
+test('GitHub Pages and same-origin callers can submit guidance requests', async () => {
+  providerResult = { text: 'Bring a written list of questions to your visit.' };
+  for (const headers of [
+    { Origin: pagesOrigin, 'Sec-Fetch-Site': 'cross-site' },
+    { Origin: app.baseURL, 'Sec-Fetch-Site': 'same-origin' }
+  ]) {
+    const before = calls;
+    const response = await post({ tool: 'assistant', text: 'Help me prepare for my appointment.' }, headers);
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), providerResult);
+    assert.equal(response.headers.get('access-control-allow-origin'), headers.Origin);
+    assert.equal(response.headers.get('vary'), 'Origin');
+    assert.equal(calls, before + 1);
+  }
+});
+
+test('unknown or malformed origins and missing cross-site origins cannot read or call AI', async () => {
+  const before = calls;
+  for (const origin of [
+    'https://unrelated.example',
+    'https://boiledeggisokay.github.io.evil.example',
+    `${pagesOrigin}/HackGwinnett6.0/`,
+    `${pagesOrigin}/`,
+    'http://boiledeggisokay.github.io',
+    'null'
+  ]) {
+    for (const [pathname, method] of [['/api/ai/status', 'GET'], ['/api/ai', 'POST'], ['/api/ai', 'OPTIONS']]) {
+      const response = await fetch(`${app.baseURL}${pathname}`, {
+        method,
+        headers: {
+          Origin: origin, 'Sec-Fetch-Site': 'cross-site', 'Content-Type': 'application/json',
+          'Access-Control-Request-Method': 'POST'
+        },
+        ...(method === 'POST' ? { body: JSON.stringify({ tool: 'assistant', text: 'Help with my visit.' }) } : {})
+      });
+      assert.equal(response.status, 403, `${method} ${pathname} from ${origin}`);
+      assert.equal(response.headers.get('access-control-allow-origin'), null);
+      assert.equal(response.headers.get('vary'), 'Origin');
+      assert.doesNotMatch(await response.text(), /test-only-key|secret provider/);
+    }
+  }
+  for (const pathname of ['/api/ai/status', '/api/ai']) {
+    const response = await fetch(`${app.baseURL}${pathname}`, { headers: { 'Sec-Fetch-Site': 'cross-site' } });
+    assert.equal(response.status, 403, 'Cross-site requests must include an approved origin');
+    assert.equal(response.headers.get('access-control-allow-origin'), null);
+  }
+  assert.equal(calls, before);
+});
+
+test('unsupported preflight methods and headers never reach the provider', async () => {
+  const before = calls;
+  for (const [pathname, method, headers] of [
+    ['/api/ai', 'DELETE', 'content-type'],
+    ['/api/ai', 'GET', 'content-type'],
+    ['/api/ai/status', 'POST', 'content-type'],
+    ['/api/ai', 'POST', 'content-type, authorization'],
+    ['/api/ai', 'POST', 'x-custom-header']
+  ]) {
+    const response = await fetch(`${app.baseURL}${pathname}`, {
+      method: 'OPTIONS',
+      headers: {
+        Origin: pagesOrigin, 'Access-Control-Request-Method': method,
+        'Access-Control-Request-Headers': headers
+      }
+    });
+    assert.equal(response.status, 403);
+    assert.equal(response.headers.get('access-control-allow-origin'), pagesOrigin);
+    assert.equal(response.headers.get('access-control-allow-methods'), null);
+    assert.equal(response.headers.get('access-control-allow-headers'), null);
+  }
+  const missingOrigin = await fetch(`${app.baseURL}/api/ai`, {
+    method: 'OPTIONS', headers: { 'Access-Control-Request-Method': 'POST' }
+  });
+  assert.equal(missingOrigin.status, 403);
+  assert.equal(missingOrigin.headers.get('access-control-allow-origin'), null);
+  assert.equal(calls, before);
+});
+
+test('approved-origin validation and provider errors retain CORS with sanitized messages', async () => {
+  for (const [request, expected] of [
+    [post('{', { Origin: pagesOrigin }), 400],
+    [post({ tool: 'assistant', text: 'Help.' }, { Origin: pagesOrigin, 'Content-Type': 'text/plain' }), 415],
+    [fetch(`${app.baseURL}/api/ai`, { headers: { Origin: pagesOrigin } }), 405]
+  ]) {
+    const response = await request;
+    assert.equal(response.status, expected);
+    assert.equal(response.headers.get('access-control-allow-origin'), pagesOrigin);
+    assert.equal(response.headers.get('vary'), 'Origin');
+    assert.doesNotMatch(await response.text(), /test-only-key|secret provider/);
+  }
+  try {
+    providerStatus = 401;
+    const response = await post({ tool: 'assistant', text: 'Help me prepare.' }, { Origin: pagesOrigin });
+    assert.equal(response.status, 502);
+    assert.equal(response.headers.get('access-control-allow-origin'), pagesOrigin);
+    assert.doesNotMatch(await response.text(), /test-only-key|secret provider/);
+  } finally { providerStatus = 200; }
+});
+
 test('voice output is restricted to recognized website commands', async () => {
   providerResult = { command: 'medical decoder', confidence: 0.98, relevant: true };
   let response = await post({ tool: 'voice', text: 'Could you help me understand these clinical notes?' });
@@ -91,7 +236,7 @@ test('voice output is restricted to recognized website commands', async () => {
   assert.deepEqual(await response.json(), providerResult);
 });
 
-test('cross-origin requests, invalid tools and large inputs never reach the provider', async () => {
+test('unapproved origins, invalid tools and large inputs never reach the provider', async () => {
   const before = calls;
   const cross = await post({ tool: 'assistant', text: 'Help with my visit.' }, { Origin: 'https://unrelated.example' });
   assert.equal(cross.status, 403);
@@ -126,11 +271,15 @@ test('an unconfigured app keeps local tools available and never calls a provider
   const local = await startServer();
   try {
     assert.deepEqual(await (await fetch(`${local.baseURL}/api/ai/status`)).json(), { available: false });
+    const pagesStatus = await fetch(`${local.baseURL}/api/ai/status`, { headers: { Origin: pagesOrigin } });
+    assert.deepEqual(await pagesStatus.json(), { available: false });
+    assert.equal(pagesStatus.headers.get('access-control-allow-origin'), pagesOrigin);
     const response = await fetch(`${local.baseURL}/api/ai`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      method: 'POST', headers: { 'Content-Type': 'application/json', Origin: pagesOrigin },
       body: JSON.stringify({ tool: 'assistant', text: 'Help with my visit.' })
     });
     assert.equal(response.status, 503);
+    assert.equal(response.headers.get('access-control-allow-origin'), pagesOrigin);
     assert.match((await response.json()).error, /local care tools/);
   } finally { await local.close(); }
 });

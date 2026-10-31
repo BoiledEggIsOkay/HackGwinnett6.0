@@ -10,6 +10,7 @@
     "test:browser": "node tests/browser-smoke.cjs",
     "test:browser:assistant": "node tests/browser-assistant.cjs",
     "test:browser:ai-connection": "node tests/browser-ai-connection.cjs",
+    "test:browser:pages-ai": "node tests/browser-pages-ai.cjs",
     "test:browser:ai": "node tests/browser-ai.cjs"
   }
 }

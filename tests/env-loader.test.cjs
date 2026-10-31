@@ -45,7 +45,7 @@ test('hosting environment values take precedence and missing .env is harmless', 
 test('server automatically discovers an ignored project .env without any exports', async t => {
   const folder = fs.mkdtempSync(path.join(os.tmpdir(), 'care-compass-env-server-'));
   t.after(() => fs.rmSync(folder, { recursive: true, force: true }));
-  for (const file of ['server.js', 'env-loader.js']) {
+  for (const file of ['server.js', 'env-loader.js', 'site-config.js']) {
     fs.copyFileSync(path.join(__dirname, '..', file), path.join(folder, file));
   }
   fs.writeFileSync(path.join(folder, '.env'), 'OPENAI_API_KEY=test-only-dotenv-key\nPORT=0\n');

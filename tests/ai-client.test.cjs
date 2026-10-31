@@ -4,7 +4,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 
-function client({ available = true, saved, blockedStorage = false, protocol = 'http:', statusResponse } = {}) {
+function client({ available = true, saved, blockedStorage = false, protocol = 'http:',
+  origin = 'http://localhost:3000', pathname = '/', statusResponse } = {}) {
   const calls = [];
   const events = [];
   const checkbox = {};
@@ -19,7 +20,7 @@ function client({ available = true, saved, blockedStorage = false, protocol = 'h
   const values = new Map(saved === undefined ? [] : [['care-ai-enabled', String(saved)]]);
   const window = {
     document: { querySelector: selector => elements.get(selector) || null },
-    location: { protocol },
+    location: { protocol, origin, pathname },
     localStorage: {
       getItem(key) { if (blockedStorage) throw new Error('Storage unavailable'); return values.get(key); },
       setItem(key, value) { if (blockedStorage) throw new Error('Storage unavailable'); values.set(key, value); }
@@ -36,7 +37,10 @@ function client({ available = true, saved, blockedStorage = false, protocol = 'h
     CustomEvent: class { constructor(type, options) { this.type = type; this.detail = options.detail; } },
     dispatchEvent(event) { events.push(event); }
   };
-  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../ai-client.js'), 'utf8'), { window, AbortController });
+  const context = vm.createContext({ window, AbortController });
+  for (const file of ['site-config.js', 'ai-client.js']) {
+    vm.runInContext(fs.readFileSync(path.join(__dirname, '..', file), 'utf8'), context);
+  }
   return { ai: window.CareAI, window, calls, checkbox, status, retry, help, guidance, values, events, elements };
 }
 
@@ -276,4 +280,57 @@ test('rechecking updates settings while preserving a staged choice after connect
   settings.dataset.aiEdited = 'false';
   c.ai.render();
   assert.equal(settings.checked, true, 'An untouched settings control mirrors the connection');
+});
+
+test('the GitHub Pages project sends status checks and submitted AI input to Render', async () => {
+  for (const pathname of ['/HackGwinnett6.0', '/HackGwinnett6.0/', '/HackGwinnett6.0/index.html']) {
+    const c = client({ origin: 'https://boiledeggisokay.github.io', pathname });
+    await c.ai.ready;
+    assert.equal(c.ai.enabled, true);
+    assert.equal(c.calls[0].url, 'https://hackgwinnett6-0.onrender.com/api/ai/status');
+    await c.ai.request('assistant', { text: 'Help me understand POTS.', context: { conditions: ['POTS'] } });
+    assert.equal(c.calls[1].url, 'https://hackgwinnett6-0.onrender.com/api/ai');
+    assert.equal(c.calls[1].options.credentials, 'omit', 'The AI connection does not send browser cookies');
+    assert.deepEqual(JSON.parse(c.calls[1].options.body), {
+      tool: 'assistant', text: 'Help me understand POTS.', context: { conditions: ['POTS'] }
+    });
+    assert.equal(c.window.location.origin, 'https://boiledeggisokay.github.io', 'The site keeps its Pages address');
+  }
+});
+
+test('Render, localhost, other repositories, and similar hostnames retain their own API server', async () => {
+  for (const [origin, pathname] of [
+    ['https://hackgwinnett6-0.onrender.com', '/'],
+    ['http://localhost:3000', '/'],
+    ['https://boiledeggisokay.github.io', '/OtherProject/'],
+    ['https://boiledeggisokay.github.io', '/HackGwinnett6.0-other/'],
+    ['https://boiledeggisokay.github.io.attacker.example', '/HackGwinnett6.0/']
+  ]) {
+    const c = client({ origin, pathname });
+    await c.ai.ready;
+    assert.equal(c.calls[0].url, '/api/ai/status');
+    await c.ai.request('decoder', { text: 'Explain hemoglobin.' });
+    assert.equal(c.calls[1].url, '/api/ai');
+  }
+});
+
+test('Pages connections respect saved opt-out and report blocked Render access without sending input', async () => {
+  const c = client({ origin: 'https://boiledeggisokay.github.io', pathname: '/HackGwinnett6.0/', saved: false });
+  await c.ai.ready;
+  assert.equal(c.ai.enabled, false);
+  await assert.rejects(c.ai.request('assistant', { text: 'Do not send this.' }), /AI is off/);
+  assert.equal(c.calls.length, 1);
+  c.ai.setEnabled(true);
+  await c.ai.request('assistant', { text: 'Now help me prepare.' });
+  assert.equal(c.calls[1].url, 'https://hackgwinnett6-0.onrender.com/api/ai');
+
+  const blocked = client({
+    origin: 'https://boiledeggisokay.github.io', pathname: '/HackGwinnett6.0/',
+    statusResponse: async () => { throw new TypeError('Failed to fetch'); }
+  });
+  await blocked.ai.ready;
+  assert.equal(blocked.ai.available, false);
+  assert.match(blocked.guidance.textContent, /Render.*allows this GitHub Pages site/i);
+  await assert.rejects(blocked.ai.request('assistant', { text: 'Keep this local.' }), /AI is off/);
+  assert.equal(blocked.calls.length, 1);
 });

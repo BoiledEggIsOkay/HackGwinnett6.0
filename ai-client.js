@@ -7,6 +7,12 @@
   let checking = false;
   let connection = 'checking';
   let checkPromise;
+  const site = window.CareSite;
+  const pagePath = window.location?.pathname || '';
+  const hostedAI = Boolean(site && window.location?.origin === site.pagesOrigin &&
+    (pagePath === site.pagesPath || pagePath.startsWith(`${site.pagesPath}/`)));
+  const apiOrigin = hostedAI ? site.aiOrigin : '';
+  const apiUrl = path => `${apiOrigin}${path}`;
   const activeRequests = new Set();
   try { consent = window.localStorage.getItem('care-ai-enabled') !== 'false'; } catch { /* This visit still works. */ }
 
@@ -23,6 +29,9 @@
 
   function helpText() {
     if (connection === 'file') return 'Opening index.html directly cannot connect to AI. Start the project server and use its localhost address.';
+    if (hostedAI && connection === 'missing-key') return 'The AI server is running, but it has no API key configured. The site owner needs to set OPENAI_API_KEY in the Render service’s Environment settings and redeploy.';
+    if (hostedAI && connection === 'server') return 'The AI address is serving a static preview instead of the Care Compass server. On Render, use a Web Service with npm start as its start command.';
+    if (hostedAI && connection === 'offline') return 'The Render AI server could not be reached. Make sure its deployment is running and allows this GitHub Pages site, then choose Check connection.';
     if (connection === 'missing-key') return 'The Care Compass server is running, but it has no API key configured. The site owner needs to add one before AI can be enabled.';
     if (connection === 'server') return 'A static preview such as Live Server serves the pages but cannot run the AI service. Start this project with npm start.';
     return 'The connection check failed or timed out. Make sure the project server is running, then choose Check connection to try again.';
@@ -97,7 +106,9 @@
           connection = 'file';
           return false;
         }
-        const response = await window.fetch('/api/ai/status', { signal: controller.signal, cache: 'no-store' });
+        const response = await window.fetch(apiUrl('/api/ai/status'), {
+          signal: controller.signal, cache: 'no-store', credentials: 'omit'
+        });
         if (!response.ok) {
           available = false;
           connection = response.status === 404 || response.status === 405 ? 'server' : 'offline';
@@ -145,10 +156,11 @@
     activeRequests.add(controller);
     const timeout = window.setTimeout(() => controller.abort(), 20000);
     try {
-      const response = await window.fetch('/api/ai', {
+      const response = await window.fetch(apiUrl('/api/ai'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ tool, text, context }),
+        credentials: 'omit',
         signal: controller.signal
       });
       const result = await response.json();

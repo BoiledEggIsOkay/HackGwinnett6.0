@@ -4,6 +4,7 @@ const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
 const { loadEnvFile } = require('./env-loader.js');
+const siteConfig = require('./site-config.js');
 
 loadEnvFile(path.join(__dirname, '.env'));
 
@@ -17,6 +18,7 @@ const assets = new Map([
   ['/medical-tools.js', ['medical-tools.js', 'text/javascript']],
   ['/care-assistant.js', ['care-assistant.js', 'text/javascript']],
   ['/care-tools.js', ['care-tools.js', 'text/javascript']],
+  ['/site-config.js', ['site-config.js', 'text/javascript']],
   ['/ai-client.js', ['ai-client.js', 'text/javascript']],
   ['/settings.js', ['settings.js', 'text/javascript']],
   ['/policies.js', ['policies.js', 'text/javascript']],
@@ -89,13 +91,47 @@ function json(response, status, body, head = false) {
   response.end(head ? undefined : data);
 }
 
-function sameOrigin(request) {
+function allowedSource(request) {
+  const value = request.headers.origin;
+  if (value === siteConfig.pagesOrigin) return true;
   if (request.headers['sec-fetch-site'] === 'cross-site') return false;
-  if (!request.headers.origin) return true;
+  if (!value) return true;
   try {
-    const origin = new URL(request.headers.origin);
-    return ['http:', 'https:'].includes(origin.protocol) && origin.host === request.headers.host;
+    const origin = new URL(value);
+    return origin.origin === value && ['http:', 'https:'].includes(origin.protocol) &&
+      origin.host === request.headers.host;
   } catch { return false; }
+}
+
+function apiAccess(request, response, methods) {
+  response.setHeader('Vary', 'Origin');
+  if (!allowedSource(request)) {
+    json(response, 403, { error: 'AI requests must come from this website.' }, request.method === 'HEAD');
+    return false;
+  }
+  if (request.headers.origin) response.setHeader('Access-Control-Allow-Origin', request.headers.origin);
+  if (request.method === 'OPTIONS') {
+    const requestedMethod = request.headers['access-control-request-method'];
+    const requestedHeaders = (request.headers['access-control-request-headers'] || '')
+      .split(',').map(value => value.trim().toLowerCase()).filter(Boolean);
+    if (!request.headers.origin || !methods.includes(requestedMethod) ||
+        requestedHeaders.some(value => value !== 'content-type')) {
+      json(response, 403, { error: 'This AI request is not allowed.' });
+      return false;
+    }
+    response.setHeader('Access-Control-Allow-Methods', [...methods, 'OPTIONS'].join(', '));
+    response.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    response.setHeader('Access-Control-Max-Age', '600');
+    response.writeHead(204);
+    response.end();
+    return false;
+  }
+  if (!methods.includes(request.method)) {
+    response.setHeader('Allow', [...methods, 'OPTIONS'].join(', '));
+    json(response, 405, { error: 'Method not allowed.' }, request.method === 'HEAD');
+    return false;
+  }
+  return true;
 }
 
 function readBody(request, signal) {
@@ -165,7 +201,6 @@ async function readUpstream(response) {
 }
 
 async function ai(request, response) {
-  if (!sameOrigin(request)) return json(response, 403, { error: 'AI requests must come from this website.' });
   if (!(request.headers['content-type'] || '').startsWith('application/json')) {
     return json(response, 415, { error: 'Use application/json.' });
   }
@@ -255,10 +290,12 @@ const server = http.createServer((request, response) => {
     response.end('Invalid URL');
     return;
   }
-  if (pathname === '/api/ai/status' && ['GET', 'HEAD'].includes(request.method)) {
+  if (pathname === '/api/ai/status') {
+    if (!apiAccess(request, response, ['GET', 'HEAD'])) return;
     return json(response, 200, { available: Boolean(apiKey) }, request.method === 'HEAD');
   }
-  if (pathname === '/api/ai' && request.method === 'POST') {
+  if (pathname === '/api/ai') {
+    if (!apiAccess(request, response, ['POST'])) return;
     void ai(request, response);
     return;
   }
