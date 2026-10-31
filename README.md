@@ -1,10 +1,15 @@
 # Care Compass · HackGwinnett 6.0
 
-A browser prototype for understanding medical notes, finding specialist
-resources, preparing appointments, tracking symptoms, and getting care navigation
-guidance. All five sections work with local resources. An optional server-side
-OpenAI connection adds natural-language voice intent and personalized educational
-guidance across the decoder, specialist finder, care plan, and care assistant.
+## Elevator pitch
+
+Care Compass helps people turn confusing medical notes into clear next steps,
+find trusted specialist resources, and feel prepared for care. With accessible
+voice guidance, a personal care plan, and connected AI tools, it gives people
+navigating chronic or overlooked conditions a clearer way to advocate for themselves.
+
+This educational prototype includes a medical decoder, specialist resources,
+visit preparation, symptom tracking, and a care assistant. It supports informed
+conversations with clinicians and does not diagnose or prescribe.
 
 ## Run locally
 
@@ -24,91 +29,98 @@ Keep the whole project folder together, including all JavaScript modules.
 Opening an HTML-only copy or a preview that does not serve the other files
 will lose the formatting and scripts. If you see an unformatted white page,
 confirm you are visiting the localhost URL, restart the server, and refresh
-with **Command + Shift + R** on a Mac. In Chrome's Network panel, `style.css?v=3`
+with **Command + Shift + R** on a Mac. In Chrome's Network panel, `style.css?v=4`
 should return `200` with a `text/css` content type.
 
 The stylesheet uses local system fonts and needs no Google Fonts request.
 The local server sends fresh asset headers, and the HTML includes versioned
 asset URLs to refresh older cached files.
 
-## Voice assistance
+## Voice assistance and settings
 
-Voice assistance defaults to **off**. The app does not ask for microphone access
-or play a greeting on arrival. Use **Voice assistance** to enable it; your saved
-choice is respected on later visits. Allow microphone access when the browser
-asks. A denial cannot be bypassed; allow the microphone in site settings, then
-choose **Retry microphone**.
+Voice assistance defaults to **off**. A first visit starts without requesting a
+microphone or playing a greeting. Choose **Voice assistance** when you want
+spoken input guidance. Page announcements and responses only play while voice
+is on.
 
-**Listen for “voice assistant on”** is a separate, optional setting. It requires
-microphone permission and keeps recognition active while the assistant is off,
-but accepts only wake phrases such as “voice assistant on” or “turn on voice
-assistant.” Other speech does not run commands or reach the AI service in that
-mode. Uncheck it to stop wake listening and release the microphone when voice
-assistance is off.
+When you open a section that needs input, the assistant explains what to enter.
+In Care assistant, dictate or type a prompt; the assistant reviews it and asks
+you to confirm before sending. The same review step applies to notes and saved
+care information while voice assistance is enabled. Say **confirm**, **send**,
+or **save** to continue, **change** to edit, or **cancel** to discard the action.
+The visible confirmation controls also work without speaking.
+
+The app reuses its recognition setup and checks microphone permission when the
+browser exposes that information. It does not ask for a separate audio stream.
+A browser can still require permission per session or visit. To avoid repeated
+prompts, serve over **HTTPS** or **localhost** and choose a persistent microphone
+permission in the browser's site settings when that option is available. If
+access is denied, allow it in site settings and choose **Retry microphone**.
+
+**Listen for “voice assistant on”** is separate and optional. While voice is
+off, it uses the microphone only to recognize a wake phrase and ignores other
+commands. Uncheck this option to stop wake listening when assistance is off.
 
 Examples:
 
 | Say | Result |
 | --- | --- |
-| “Go to overview / medical decoder / find a specialist / my care plan / care assistant” | Opens the section and guides you through relevant input |
-| “Can you take me to my care plan?” / “Help me understand my notes” | Recognizes common alternative phrasing |
-| “Decode my notes” | Asks for notes, accepts spoken input, and explains known terms |
-| “Find a specialist for POTS” | Selects the condition's public directory |
-| “Add a task” | Asks what reminder to add and saves your spoken answer |
-| “Read my checklist” / “complete item two” / “remove item three” | Reads or updates numbered checklist items |
-| “Ask a question” | Asks for your question and gives local or optional AI guidance |
-| “Edit profile” / “remove POTS” / “save profile” | Updates profile conditions |
-| “Accessibility settings” / “larger text on” / “higher contrast off” | Changes saved accessibility preferences |
-| “Read this page” / “notifications” / “our promise” | Reads content or opens the corresponding feature |
-| “Stop speaking” | Interrupts speech and keeps listening |
-| “Turn off voice assistant” | Stops speech and regular commands; optional wake listening remains |
-| “Cancel” | Cancels the current input |
+| “Take me to the medical decoder” | Opens notes input and explains what to enter |
+| “Help me understand my notes” | Captures notes for review before explaining |
+| “I need a doctor for diabetes” | Opens related condition and specialty resources |
+| “Add a task” | Captures a reminder and asks you to verify before saving |
+| “Read my checklist” / “complete item two” | Reads or manages numbered items |
+| “Care assistant” | Asks for your prompt, then reviews it before sending |
+| “Confirm” / “change” / “cancel” | Sends, edits, or discards the current review |
+| “Settings” / “larger text on” | Opens or updates accessibility preferences |
+| “Turn off voice assistant” | Stops normal commands and spoken responses |
 
-The microphone pauses while the app speaks and resumes after a short cooldown,
-so its own spoken responses do not become commands. Use **Interrupt / give a
-command** to stop a spoken response and resume listening. Transcripts clear
-between commands. Recognition confidence and website relevance checks ignore
-low-confidence speech and unrelated discussion such as Minecraft.
+Listening pauses during spoken replies to prevent self-transcription, then
+resumes after a short cooldown. Use **Interrupt / give a command** to stop a
+reply. Recognition confidence and relevance checks filter unrelated discussion,
+and transcripts clear between commands. Background filtering is best effort;
+browser speech recognition cannot reliably separate nearby speakers or guarantee
+acoustic noise cancellation. A quiet room or headset can help.
 
-Background filtering is best effort. Browser speech recognition cannot reliably
-separate nearby speakers or guarantee acoustic noise cancellation. Use a quiet
-room or a headset for better recognition. The app only acts on finalized speech,
-and a local phrase parser works without an AI key.
-Speech recognition support and microphone behavior vary by browser and platform;
-Chrome's recognition service generally also requires an internet connection.
-For hosted microphone access, serve the site over HTTPS. Localhost works for local
-development. A file picker still requires direct interaction; dictation is the
-voice alternative for medical notes.
+Settings include voice selection and speaking speed, dark mode, larger text,
+high contrast, a reading layout for dyslexia, and reduced motion. Available
+voices depend on your browser and device. The app saves preferences locally.
+Speech recognition varies by browser and generally requires an internet
+connection; audio may be processed by the browser's recognition provider.
 
-## Optional AI setup
+## Automatic AI connection
 
-The website works without a key. To connect AI, set these environment variables
-on the machine running `server.js`, then restart the server:
+The server loads an ignored `.env` file automatically when it starts. Add a
+server API key once:
 
 ```sh
-export OPENAI_API_KEY="your-server-api-key"
-export OPENAI_MODEL="gpt-5.6-terra"
-npm start
+cp .env.example .env
 ```
 
-`.env.example` is a configuration template; this dependency-free server does not
-automatically load `.env` files. Never put a real key into browser JavaScript or
-commit it. `.env` files are ignored by Git.
+Open `.env` and fill in `OPENAI_API_KEY`, then run `npm start`. There is no need
+to export variables on every visit or switch AI on in the website. When the
+server has a configured key, the site connects AI automatically. A previously
+saved choice to turn AI off is respected; the AI control lets you opt out.
+Hosting environment variables take precedence over `.env` values.
 
-After connecting the server, enable **Use AI tools** in the website. This choice
-defaults to off. When enabled, submitted text and relevant context are sent to
-OpenAI, including notes, questions, selected conditions, and recent chat messages
-needed for the requested tool. Keep identifying details out of your input.
-Audio itself is handled by the browser's speech service, not this AI endpoint.
+A real API key must come from the server operator's OpenAI account; the app
+cannot create one automatically. Without a key, or if AI fails, the site uses
+its local educational tools and clearly labels that mode. The default model is
+`gpt-5.6-terra`; `OPENAI_MODEL` can select another model your account supports.
+Keep the key on the server. `.env` files are ignored by Git and are not served
+to the browser.
 
-The server uses the Responses API with JSON Schema output and `store: false`.
-It does not store or log medical input or expose the API key. Provider processing
-still applies; `store: false` is not a promise of zero provider retention.
-Requests have size limits, timeouts, per-client rate limits, and browser origin
-checks. If AI is unavailable or fails, local tools remain available.
+When AI is active, submitting a tool sends the relevant text and context to
+OpenAI: notes, questions, selected conditions, and recent chat messages needed
+for the answer. Keep identifying details out of your input. Audio is handled
+by the browser's speech service and is not sent to this AI endpoint.
 
-The default model is configurable. Its account availability depends on your
-OpenAI access. Official implementation references:
+The server uses the Responses API with structured output and `store: false`.
+It does not save or log submitted medical text. Provider processing still
+applies; `store: false` is not a promise of zero provider retention. Requests
+have size limits, timeouts, rate limits, and browser origin checks.
+
+Implementation references:
 
 - [Responses structured outputs](https://developers.openai.com/api/docs/guides/structured-outputs)
 - [GPT-5.6 Terra](https://developers.openai.com/api/docs/models/gpt-5.6-terra)
@@ -120,23 +132,34 @@ OpenAI access. Official implementation references:
   PDF, images and Word files require copying their text into the notes field.
   Clear notes, try an example, or save follow-up questions to your checklist.
   Unknown inputs receive an explanation of what could and could not be matched.
-- **Find a specialist:** search the condition library, see suggested specialties
-  and trusted resource links, add a location for map searches, and save booking
-  questions. Links are searches and public directories, not verified available
-  appointments or insurance matches.
+- **Find a specialist:** search conditions or specialties using aliases,
+  common clinician names, and flexible wording; see trusted resources and save
+  booking questions. Location input has been removed because the prototype does
+  not verify specific local doctors. Resource links do not confirm availability
+  or insurance coverage.
 - **My care plan:** review checklist templates, choose suggested questions,
   track completion, save an appointment and symptom record, and download a text
   copy to bring to a visit. AI suggestions are reviewed before being added.
 - **Care assistant:** explains terms and conditions, helps prepare visits and
   medication reviews, and discusses insurance or accessibility questions.
-  Save a question to your visit checklist or clear the conversation at any time.
-  It provides educational guidance, not diagnosis, prescriptions or emergency
-  assessment.
+  With voice on, entering the page prompts for your question and asks you to
+  verify it before sending. Save a question to your checklist or clear the
+  conversation at any time. It cannot diagnose, prescribe, or assess emergencies.
 
 Profile conditions, checklist items, symptoms, appointment details and
 preferences stay in browser storage on that device. Medical notes and chat are
 not saved by this app. The browser's speech recognition provider may process
 audio; browser voice input is not an offline audio service.
+
+## Policies and data controls
+
+The site footer links to Terms of Use, Privacy Policy, accessibility information,
+and help. These describe this prototype's educational role, browser storage,
+AI and speech-provider processing, and limitations of external resource links.
+Data controls let you remove saved information from this browser. There are no
+user accounts, advertising cookies, analytics, or background document uploads.
+Downloading a care plan creates a file on your device; clearing browser data
+does not delete that downloaded copy.
 
 ## Verification
 
@@ -146,8 +169,9 @@ npm test
 
 The dependency-free tests cover voice lifecycle, speaker echo suppression,
 wake-only standby, relevance filtering, local medical matching, static asset
-delivery, and AI opt-in and server validation. AI tests use a local mock provider
-and never send medical data or make paid API requests.
+delivery, automatic AI connection, environment loading, saved opt-outs, and
+server validation. AI tests use a local mock provider and never send medical
+data or make paid API requests.
 
 Optional Chromium UI checks require a separately installed Playwright and its
 Chromium browser:
@@ -160,7 +184,7 @@ npm run test:browser:ai
 If Playwright is installed outside this project, set `CARE_COMPASS_PLAYWRIGHT`
 to its module directory when running those commands. Browser checks use simulated
 speech events. The AI browser check intercepts provider responses locally and
-verifies all five tool routes, opt-in, safe text rendering, fallback and
-turning AI off during a request. Test the actual microphone and audio on your
-Mac as well.
+verifies all five tool routes, automatic connection, safe text rendering, fallback,
+input review, and turning AI off during a request. Test the actual microphone and
+audio on your Mac as well.
 

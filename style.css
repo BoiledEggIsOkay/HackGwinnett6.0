@@ -567,3 +567,98 @@ dialog::backdrop {
   .ai-panel { margin-left: 14px; margin-right: 14px; }
   .feature-panel { padding: 19px; }
 }
+
+.settings-label { display: block; font-size: 13px; margin: 17px 0 8px; }
+#voice-rate { width: 100%; accent-color: var(--green); }
+#voice-preview { margin-top: 12px; }
+#rate-value { float: right; }
+#settings-dialog h3 { margin-top: 25px; font-size: 16px; }
+#reset-data { margin-top: 14px; width: 100%; }
+.danger { color: #9b403b; border-color: #ddbbb8; }
+#specialist-search { width: 100%; }
+.review-summary {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 40vh;
+  overflow-y: auto;
+  padding: 18px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #f2f6ee;
+  line-height: 1.8;
+}
+#review-dialog .primary { width: auto; margin-top: 0; }
+#review-dialog .tool-actions { align-items: stretch; }
+.site-footer { padding: 24px 44px; gap: 12px 24px; flex-wrap: wrap; border-top: 1px solid var(--border); }
+.site-footer nav {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: 12px 20px;
+  margin: 0 0 0 auto;
+  font-size: 12px;
+}
+.site-footer a { text-decoration: underline; text-underline-offset: 3px; min-height: 30px; display: inline-flex; align-items: center; }
+.policy-copy { font-size: 14px; line-height: 1.85; }
+.policy-copy p { color: var(--dark); }
+.policy-copy a { color: var(--green); overflow-wrap: anywhere; }
+.reduce-motion *, .reduce-motion *::before, .reduce-motion *::after {
+  animation: none !important;
+  transition: none !important;
+  scroll-behavior: auto !important;
+}
+.dyslexia-friendly { font-family: Verdana, 'Trebuchet MS', Arial, sans-serif; line-height: 1.9; letter-spacing: .035em; word-spacing: .08em; }
+.dyslexia-friendly p, .dyslexia-friendly label, .dyslexia-friendly input,
+.dyslexia-friendly textarea, .dyslexia-friendly .chat-message { line-height: 1.9; }
+.dyslexia-friendly h1, .dyslexia-friendly h2, .dyslexia-friendly h3 { font-family: inherit; letter-spacing: .015em; }
+.dark-mode {
+  color-scheme: dark;
+  --bg: #18241f;
+  --dark: #e4ece2;
+  --muted: #aab9ac;
+  --border: #435449;
+  --green: #8bc3a8;
+}
+.dark-mode .sidebar, .dark-mode header { background: #202f27; border-color: var(--border); }
+.dark-mode .brand, .dark-mode h1, .dark-mode h2, .dark-mode h3 { color: #e4ece2; }
+.dark-mode .tool-card, .dark-mode .care-panel, .dark-mode .visit-panel,
+.dark-mode .feature-panel, .dark-mode .ai-panel, .dark-mode dialog { background: #24342a; color: var(--dark); }
+.dark-mode .voice-panel, .dark-mode .hero, .dark-mode .plan-note,
+.dark-mode .bot, .dark-mode .review-summary, .dark-mode .directory-list a { background: #2d4131; border-color: var(--border); }
+.dark-mode .upload-zone { background: linear-gradient(135deg, #293d2d, #304735); border-color: #6b8969; }
+.dark-mode .upload-zone:hover, .dark-mode .upload-zone.drag-active { background: #39563e; }
+.dark-mode input, .dark-mode textarea, .dark-mode select { background: #1d2d23; color: #e4ece2; border-color: #657a65; }
+.dark-mode .primary, .dark-mode .user, .dark-mode #toast { background: #376d51; color: #fff; }
+.dark-mode .primary:hover { background: #417e5f; }
+.dark-mode .secondary, .dark-mode .upload-choose, .dark-mode .voice-panel-actions button {
+  background: #263e2d; border-color: #5d7a5a; color: #c3dfb9;
+}
+.dark-mode .nav-item.active, .dark-mode .nav-item:hover,
+.dark-mode .voice-button[aria-pressed="true"], .dark-mode .conditions > span { background: #354c38; color: #d3e4c8; }
+.dark-mode p, .dark-mode .eyebrow, .dark-mode .page-intro, .dark-mode .tool-description,
+.dark-mode .date, .dark-mode footer, .dark-mode .breadcrumb,
+.dark-mode .nav-item, .dark-mode .fine-print, .dark-mode .ai-panel small,
+.dark-mode .tool-source, .dark-mode small, .dark-mode .directory-list span,
+.dark-mode .upload-zone span, .dark-mode #voice-hint, .dark-mode #voice-status,
+.dark-mode .voice-privacy, .dark-mode .panel-intro, .dark-mode .progress-row { color: #b8c8b5; }
+.dark-mode .text-button, .dark-mode .policy-copy a, .dark-mode .tool-link,
+.dark-mode .circle-button { color: #b6d9b2; }
+.dark-mode .visit-item { color: #b8c8b5; }
+.dark-mode .skip { background: #24342a; color: #e4ece2; }
+.dark-mode .avatar, .dark-mode .small-avatar, .dark-mode .upload-icon,
+.dark-mode .pill { background: #435d3f; color: #e4ecd9; }
+.dark-mode .danger { color: #f2bab5; border-color: #a8716c; }
+.dark-mode.high-contrast { --border: #a7bca4; --dark: #fff; }
+.dark-mode.high-contrast p, .dark-mode.high-contrast small,
+.dark-mode.high-contrast .nav-item, .dark-mode.high-contrast .fine-print,
+.dark-mode.high-contrast .eyebrow, .dark-mode.high-contrast .voice-privacy,
+.dark-mode.high-contrast .panel-intro, .dark-mode.high-contrast .tool-source,
+.dark-mode.high-contrast .visit-item, .dark-mode.high-contrast .tool-link { color: #edf6e8; }
+@media (max-width: 650px) {
+  .site-footer { padding: 20px; }
+  .site-footer nav { width: 100%; margin-left: 0; gap: 8px 16px; }
+  .dyslexia-friendly nav .nav-item { font-size: 9px; letter-spacing: 0; }
+}
+@media (max-width: 400px) {
+  .site-footer { padding-left: 14px; padding-right: 14px; }
+}

@@ -17,6 +17,13 @@ function browser(options = {}) {
   let clears = 0;
   const instances = [];
   const listeners = new Map();
+  let permissionQueries = 0;
+  let microphoneRequests = 0;
+  let permissionChange;
+  const permissionStatus = {
+    state: options.permissionState,
+    addEventListener(type, handler) { if (type === 'change') permissionChange = handler; }
+  };
   const schedule = (callback, delay = 0) => {
     const id = nextTimer++;
     timers.set(id, { callback, at: now + delay });
@@ -69,7 +76,7 @@ function browser(options = {}) {
     pending: false,
     utterances: [],
     cancels: 0,
-    getVoices: () => [{ lang: 'en-US', name: 'Test voice' }],
+    getVoices: () => options.voices || [{ lang: 'en-US', name: 'Test voice', voiceURI: 'test-voice' }],
     addEventListener() {},
     cancel() {
       this.cancels++;
@@ -106,6 +113,21 @@ function browser(options = {}) {
     addEventListener(type, handler) { listeners.set(type, handler); },
     removeEventListener(type) { listeners.delete(type); }
   };
+  if (options.permissionState) {
+    window.navigator.permissions = {
+      query(descriptor) {
+        assert.equal(descriptor.name, 'microphone');
+        permissionQueries++;
+        return options.permissionUnsupported ? Promise.reject(new TypeError('Unsupported permission')) : Promise.resolve(permissionStatus);
+      }
+    };
+  }
+  window.navigator.mediaDevices = {
+    getUserMedia() {
+      microphoneRequests++;
+      return Promise.reject(new Error('Microphone permission must use recognition, not a second stream.'));
+    }
+  };
   window.document = document;
   const context = vm.createContext({
     window, document, navigator: window.navigator, location: window.location,
@@ -132,6 +154,14 @@ function browser(options = {}) {
   return {
     engine, window, synthesis, states, transcripts, errors, instances, timers, wakes,
     get clears() { return clears; },
+    get permissionQueries() { return permissionQueries; },
+    get microphoneRequests() { return microphoneRequests; },
+    get starts() { return instances.reduce((count, instance) => count + instance.starts, 0); },
+    changePermission(value) { permissionStatus.state = value; permissionChange?.(); },
+    async permissionsReady() {
+      for (let i = 0; i < 6; i++) await Promise.resolve();
+      advance();
+    },
     finishSpeech() { synthesis.speaking = false; synthesis.utterances.at(-1)?.onend?.(); },
     advance, emit,
     end() {
@@ -170,7 +200,8 @@ test('restarts after recognition ends without enabling interim results', () => {
   b.end();
   b.advance(5000);
   assert.equal(b.engine.listening, true);
-  assert.ok(b.instances.length >= 2);
+  assert.equal(b.instances.length, 1);
+  assert.equal(b.starts, 2);
 });
 
 test('disabling fully releases microphone and prevents recognition restarting', () => {
@@ -180,12 +211,12 @@ test('disabling fully releases microphone and prevents recognition restarting', 
   b.engine.speak('A long explanation of your care plan.');
   b.advance();
   b.engine.disable();
-  const starts = b.instances.length;
+  const starts = b.starts;
   b.advance(60000);
   assert.equal(b.engine.enabled, false);
   assert.equal(b.engine.speaking, false);
   assert.equal(b.engine.listening, false);
-  assert.equal(b.instances.length, starts);
+  assert.equal(b.starts, starts);
   assert.ok(b.synthesis.cancels > 0);
 });
 
@@ -207,7 +238,8 @@ test('pauses microphone while speaking, ignores stale results, and resumes after
   assert.equal(b.engine.listening, false);
   b.advance(1);
   assert.equal(b.engine.listening, true);
-  assert.notEqual(b.instances.at(-1), oldSession);
+  assert.equal(b.instances.at(-1), oldSession);
+  assert.equal(oldSession.starts, 2);
   b.emit('Your care plan includes a checklist for your next appointment.');
   assert.deepEqual(b.transcripts, []);
   b.emit('open medical decoder', { index: 1 });
@@ -250,6 +282,12 @@ test('wake standby ignores every normal command and unrelated conversation', () 
   b.emit('voice assistant on', { index: 3 });
   assert.deepEqual(b.wakes, ['voice assistant on']);
   assert.deepEqual(b.transcripts, []);
+  b.engine.enable();
+  assert.equal(b.states.at(-1).state, 'listening', 'Wake activation must publish the new enabled mode');
+  assert.equal(b.instances.length, 1);
+  assert.equal(b.starts, 1, 'Wake activation should keep the existing capture session');
+  b.emit('open medical decoder', { index: 4 });
+  assert.deepEqual(b.transcripts, ['open medical decoder']);
 });
 
 test('wake mode remains available after turning voice off and can be fully disabled', () => {
@@ -265,10 +303,10 @@ test('wake mode remains available after turning voice off and can be fully disab
   b.emit('turn on the voice assistant');
   assert.deepEqual(b.wakes, ['turn on the voice assistant']);
   b.engine.setWakeListening(false);
-  const starts = b.instances.length;
+  const starts = b.starts;
   b.advance(60000);
   assert.equal(b.engine.listening, false);
-  assert.equal(b.instances.length, starts);
+  assert.equal(b.starts, starts);
 });
 
 test('low confidence and interim background speech never reaches the app', () => {
@@ -305,9 +343,9 @@ test('microphone denial stops retries and reports actionable feedback', () => {
   b.advance();
   b.error('not-allowed');
   b.end();
-  const starts = b.instances.length;
+  const starts = b.starts;
   b.advance(60000);
-  assert.equal(b.instances.length, starts);
+  assert.equal(b.starts, starts);
   assert.ok(b.errors.length > 0);
   assert.ok(b.states.some(({ state }) => state === 'permission'));
 });
@@ -317,9 +355,9 @@ test('wake standby permission denial also stops retries', () => {
   b.engine.setWakeListening(true);
   b.advance();
   b.error('not-allowed');
-  const starts = b.instances.length;
+  const starts = b.starts;
   b.advance(60000);
-  assert.equal(b.instances.length, starts);
+  assert.equal(b.starts, starts);
   assert.ok(b.states.some(({ state }) => state === 'permission'));
 });
 
@@ -332,9 +370,9 @@ test('repeated network failures eventually stop retrying', () => {
     b.end();
     b.advance(60000);
   }
-  const starts = b.instances.length;
+  const starts = b.starts;
   b.advance(600000);
-  assert.equal(b.instances.length, starts);
+  assert.equal(b.starts, starts);
   assert.ok(starts < 12);
   assert.ok(b.errors.length > 0);
 });
@@ -366,12 +404,14 @@ test('old session permission and end callbacks cannot affect a newly enabled ses
   b.engine.enable();
   b.advance();
   const oldSession = b.instances.at(-1);
+  const oldError = oldSession.onerror;
+  const oldEnd = oldSession.onend;
   b.engine.disable();
   b.engine.enable();
   b.advance();
-  assert.notEqual(b.instances.at(-1), oldSession);
-  oldSession.onerror?.({ error: 'not-allowed' });
-  oldSession.onend?.();
+  assert.equal(b.instances.at(-1), oldSession);
+  oldError?.({ error: 'not-allowed' });
+  oldEnd?.();
   b.advance(10000);
   assert.equal(b.engine.enabled, true);
   assert.equal(b.engine.listening, true);
@@ -507,4 +547,147 @@ test('accepts visit logistics and directed site requests without medical jargon'
   assert.equal(intents.isRelevant('Could you open the page with my visit questions?'), true);
   assert.equal(intents.isRelevant('Could you open the tab with my saved stuff?'), true);
   assert.equal(intents.isRelevant('Could you open the Minecraft page?'), false);
+});
+
+test('reuses saved permission and one recognizer across commands and voice toggles', async () => {
+  const b = browser({ permissionState: 'granted' });
+  await b.permissionsReady();
+  assert.equal(b.permissionQueries, 0);
+  assert.equal(b.instances.length, 0);
+  b.engine.enable();
+  await b.permissionsReady();
+  b.emit('open medical decoder');
+  b.emit('find a specialist', { index: 1 });
+  b.emit('open my care plan', { index: 2 });
+  assert.deepEqual(b.transcripts, ['open medical decoder', 'find a specialist', 'open my care plan']);
+  assert.equal(b.starts, 1, 'Final commands keep the granted recognition session open');
+  for (let i = 0; i < 3; i++) {
+    b.engine.disable();
+    b.engine.enable();
+    b.advance();
+  }
+  assert.equal(b.instances.length, 1, 'Toggles reuse the browser recognizer');
+  assert.equal(b.permissionQueries, 1, 'Existing grant is queried once, never requested by a second audio stream');
+  assert.equal(b.microphoneRequests, 0);
+  assert.equal(b.engine.listening, true);
+});
+
+test('known denied permission never starts recognition and explicit retry uses a changed grant', async () => {
+  const b = browser({ permissionState: 'denied' });
+  b.engine.enable();
+  await b.permissionsReady();
+  assert.equal(b.instances.length, 0);
+  assert.ok(b.states.some(({ state }) => state === 'permission'));
+  b.advance(60000);
+  assert.equal(b.permissionQueries, 1);
+  b.changePermission('granted');
+  b.engine.enable();
+  b.advance();
+  assert.equal(b.engine.listening, true);
+  assert.equal(b.instances.length, 1);
+  assert.equal(b.microphoneRequests, 0);
+});
+
+test('permission checks cannot turn the microphone on after voice is disabled', async () => {
+  const b = browser({ permissionState: 'granted' });
+  b.engine.enable();
+  b.engine.disable();
+  await b.permissionsReady();
+  assert.equal(b.engine.enabled, false);
+  assert.equal(b.engine.listening, false);
+  assert.equal(b.instances.length, 0);
+  b.engine.enable();
+  b.advance();
+  assert.equal(b.engine.listening, true);
+  assert.equal(b.permissionQueries, 1);
+});
+
+test('unsupported microphone permission descriptors fall back to browser-managed recognition', async () => {
+  const b = browser({ permissionState: 'prompt', permissionUnsupported: true });
+  b.engine.enable();
+  await b.permissionsReady();
+  assert.equal(b.engine.listening, true);
+  assert.equal(b.permissionQueries, 1);
+  assert.equal(b.microphoneRequests, 0);
+  b.engine.disable();
+  b.advance();
+  b.engine.enable();
+  b.advance();
+  assert.equal(b.instances.length, 1);
+  assert.equal(b.permissionQueries, 1);
+});
+
+test('revoking saved permission stops capture without retrying in the background', async () => {
+  const b = browser({ permissionState: 'granted' });
+  b.engine.enable();
+  await b.permissionsReady();
+  b.changePermission('denied');
+  b.advance(60000);
+  assert.equal(b.engine.listening, false);
+  assert.equal(b.starts, 1);
+  assert.ok(b.states.some(({ state }) => state === 'permission'));
+});
+
+test('selected browser voice and speech rate apply to new utterances with a safe fallback', () => {
+  const b = browser({ voices: [
+    { lang: 'en-US', name: 'Local default', voiceURI: 'local-default', localService: true },
+    { lang: 'en-GB', name: 'Preferred voice', voiceURI: 'preferred' }
+  ] });
+  b.engine.setSpeechOptions({ voiceURI: 'preferred', rate: 0.8, pitch: 1.2 });
+  b.engine.enable();
+  b.advance();
+  b.engine.speak('Please review your question.');
+  const preferred = b.synthesis.utterances.at(-1);
+  assert.equal(preferred.voice.voiceURI, 'preferred');
+  assert.equal(preferred.lang, 'en-GB');
+  assert.equal(preferred.rate, 0.8);
+  assert.equal(preferred.pitch, 1.2);
+  b.engine.setSpeechOptions({ voiceURI: 'removed-browser-voice', rate: 9, pitch: 'invalid' });
+  b.engine.speak('This uses an available browser voice.');
+  const fallback = b.synthesis.utterances.at(-1);
+  assert.equal(fallback.voice.voiceURI, 'local-default');
+  assert.equal(fallback.rate, 1.5);
+  assert.equal(fallback.pitch, 1.2);
+  assert.equal(b.engine.getVoices().length, 2);
+});
+
+test('review actions are relevant only in a pending confirmation', () => {
+  for (const [text, command] of [
+    ['yes', 'confirm'], ['Confirm please', 'confirm'], ['Send it', 'confirm'],
+    ['Yes save it', 'confirm'], ['Go ahead', 'confirm'], ['That is correct', 'confirm'],
+    ['No', 'change'], ['Change it', 'change'], ['Edit', 'change'],
+    ['Repeat', 'repeat'], ['Read it again', 'repeat'], ['Cancel', 'cancel']
+  ]) {
+    assert.equal(intents.parse(text, { pending: { kind: 'confirmation' } })?.command, command, text);
+    assert.equal(intents.isRelevant(text, { pending: { kind: 'confirmation' } }), true, text);
+  }
+  assert.equal(intents.parse('yes'), null);
+  assert.equal(intents.parse('send it'), null);
+  assert.equal(intents.isRelevant('yes'), false);
+  assert.equal(intents.isRelevant('Yes send Minecraft', { pending: { kind: 'confirmation' } }), false);
+});
+
+test('reading preference aliases produce commands the app can execute', () => {
+  for (const [text, command] of [
+    ['Dyslexia on', 'dyslexia mode on'],
+    ['Disable dyslexia', 'disable dyslexia mode'],
+    ['Turn dyslexia mode off', 'turn dyslexia mode off'],
+    ['Reduce motion on', 'reduced motion on'],
+    ['Switch reduce motion off', 'switch reduced motion off'],
+    ['Reduced motion on', 'reduced motion on'],
+    ['Dark mode on', 'dark mode on']
+  ]) assert.equal(intents.parse(text)?.command, command, text);
+});
+
+test('plain symptom wording works in guided inputs while gaming discussion stays excluded', () => {
+  for (const pending of [null, { kind: 'chat' }, { kind: 'plan-concern' }, { kind: 'symptom-name' }]) {
+    for (const text of ['I am tired', 'I feel exhausted', 'I have exhaustion']) {
+      assert.equal(intents.isRelevant(text, { pending }), true, text);
+      if (pending) assert.equal(intents.parse(text, { pending })?.command, text);
+    }
+    for (const text of ['I am tired of Minecraft', 'I am exhausted from playing Minecraft', 'Lets play Minecraft']) {
+      assert.equal(intents.isRelevant(text, { pending }), false, text);
+      assert.equal(intents.parse(text, { pending }), null, text);
+    }
+  }
 });

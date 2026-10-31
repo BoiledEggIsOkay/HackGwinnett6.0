@@ -3,6 +3,9 @@
 const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
+const { loadEnvFile } = require('./env-loader.js');
+
+loadEnvFile(path.join(__dirname, '.env'));
 
 const assets = new Map([
   ['/', ['index.html', 'text/html']],
@@ -13,7 +16,10 @@ const assets = new Map([
   ['/voice-intents.js', ['voice-intents.js', 'text/javascript']],
   ['/medical-tools.js', ['medical-tools.js', 'text/javascript']],
   ['/care-tools.js', ['care-tools.js', 'text/javascript']],
-  ['/ai-client.js', ['ai-client.js', 'text/javascript']]
+  ['/ai-client.js', ['ai-client.js', 'text/javascript']],
+  ['/settings.js', ['settings.js', 'text/javascript']],
+  ['/policies.js', ['policies.js', 'text/javascript']],
+  ['/input-review.js', ['input-review.js', 'text/javascript']]
 ]);
 
 // The browser never receives this key. No medical text is logged or persisted.

@@ -11,6 +11,13 @@ function mockBrowserSpeech() {
   let speech = null;
   let speechTimer = null;
   let cancels = 0;
+  let starts = 0;
+  let permissionQueries = 0;
+  const utterances = [];
+  const permission = { state: 'granted', addEventListener() {}, removeEventListener() {} };
+  Object.defineProperty(navigator, 'permissions', {
+    value: { query: async () => { permissionQueries++; return permission; } }, configurable: true
+  });
   class Recognition {
     constructor() {
       this.results = [];
@@ -19,7 +26,13 @@ function mockBrowserSpeech() {
       instances.push(this);
     }
     start() {
+      if (this.active) throw new DOMException('Already listening', 'InvalidStateError');
+      // Native results belong to a recognition session, even when the same
+      // SpeechRecognition object is reused after a spoken reply or toggle.
+      this.results = [];
+      this.index = 0;
       this.active = true;
+      starts++;
       setTimeout(() => { if (this.active) this.onstart?.(); }, 0);
     }
     abort() { this.active = false; setTimeout(() => this.onend?.(), 0); }
@@ -27,7 +40,10 @@ function mockBrowserSpeech() {
   class Utterance { constructor(text) { this.text = text; } }
   const synthesis = {
     speaking: false,
-    getVoices: () => [{ name: 'Mock voice', lang: 'en-US', localService: true }],
+    getVoices: () => [
+      { name: 'Mock voice', voiceURI: 'mock-default', lang: 'en-US', localService: true },
+      { name: 'Mock alternative', voiceURI: 'mock-alternative', lang: 'en-GB', localService: true }
+    ],
     addEventListener() {},
     cancel() {
       cancels++;
@@ -40,6 +56,7 @@ function mockBrowserSpeech() {
     speak(utterance) {
       speech = utterance;
       spoken.push(utterance.text);
+      utterances.push({ text: utterance.text, voiceURI: utterance.voice?.voiceURI, rate: utterance.rate });
       this.speaking = true;
       setTimeout(() => utterance.onstart?.(), 0);
       speechTimer = setTimeout(() => {
@@ -57,9 +74,11 @@ function mockBrowserSpeech() {
   });
   window.SpeechRecognition = window.webkitSpeechRecognition = Recognition;
   window.__mockVoice = {
-    instances, spoken,
+    instances, spoken, utterances, permission,
     get active() { return Boolean(instances.at(-1)?.active); },
     get cancels() { return cancels; },
+    get starts() { return starts; },
+    get permissionQueries() { return permissionQueries; },
     emit(text, { final = true, confidence = 1 } = {}) {
       const recognition = instances.at(-1);
       if (!recognition) return;
@@ -86,6 +105,18 @@ async function selectedCondition(page) {
   return page.locator('#specialty').evaluate(select => select.selectedOptions[0]?.textContent || '');
 }
 async function activePage(page) { return page.locator('.page.active').getAttribute('id'); }
+async function reviewReady(page, expected) {
+  await page.locator('#review-dialog').waitFor({ state: 'visible' });
+  if (expected) assert.match(await page.locator('#review-summary').textContent(), expected);
+}
+async function confirmReview(page, command = 'confirm') {
+  await reviewReady(page);
+  await speak(page, command);
+  await page.locator('#review-dialog').waitFor({ state: 'hidden' });
+}
+async function storedTaskCount(page) {
+  return page.evaluate(() => JSON.parse(localStorage.getItem('tasks') || '[]').length);
+}
 
 async function run() {
   const server = await startServer();
@@ -156,8 +187,8 @@ async function run() {
     await page.locator('[data-page="plan"]').click();
     assert.ok(await page.locator('.task').count() > 5, 'Decoder follow-up questions should be added');
 
-    // Specialist searches filter the expanded condition library. Location links
-    // are public searches and do not imply provider availability.
+    // Specialist searches recognize specialties, reordered names, aliases, and
+    // small spelling mistakes. Unlisted conditions keep useful resources.
     await page.locator('[data-page="specialists"]').click();
     const conditionCount = await page.locator('#specialty option').count();
     assert.ok(conditionCount >= 40, 'Expanded condition library should be available');
@@ -165,13 +196,25 @@ async function run() {
     assert.ok(await page.locator('#specialty option').count() < conditionCount);
     assert.match(await selectedCondition(page), /diabetes/i);
     assert.match(await page.locator('#specialist-results').textContent(), /endocrinolog/i);
-    await page.locator('#specialist-location').fill('Lawrenceville, GA');
-    await page.waitForFunction(() => [...document.querySelectorAll('#specialist-results a')].some(link => decodeURIComponent(link.href).includes('Lawrenceville')));
+    assert.equal(await page.locator('#specialist-location').count(), 0);
+    await page.locator('#specialist-search').fill('cardiologist');
+    assert.match(await page.locator('#specialist-results').textContent(), /cardiolog/i);
+    assert.ok(await page.locator('#specialty option').count() < conditionCount);
+    for (const [query, expected] of [
+      ['migriane', /migraine/i],
+      ['arthritis rheumatoid', /rheumatoid arthritis/i],
+      ['POTS', /postural|POTS/i]
+    ]) {
+      await page.locator('#specialist-search').fill(query);
+      assert.match(await selectedCondition(page), expected);
+      assert.ok(await page.locator('#specialist-results a').count() > 0, `${query} should have resources`);
+    }
     const beforeBooking = await page.evaluate(() => JSON.parse(localStorage.getItem('tasks')).length);
     await page.locator('#specialist-save').click();
     assert.ok(await page.evaluate(() => JSON.parse(localStorage.getItem('tasks')).length) > beforeBooking);
     await page.locator('#specialist-search').fill('no-such-condition-zyx');
     assert.match(await page.locator('#specialist-results').textContent(), /no|try|not found/i);
+    assert.ok(await page.locator('#specialist-results a').count() >= 2, 'Unlisted searches need a useful fallback');
     await page.locator('#specialist-search').fill('');
     assert.equal(await page.locator('#specialty option').count(), conditionCount);
 
@@ -231,9 +274,41 @@ async function run() {
     assert.match(await page.locator('.chat-message.bot').last().textContent(), /emergency services/i);
     assert.equal(await page.evaluate(() => window.__mockVoice.instances.length), 0, 'Ordinary tools must not enable the microphone');
 
-    // Accessibility can explicitly enable or disable voice, without changing
-    // staged checkbox choices during recognizer state updates.
+    // Settings persist independently from microphone activation. Choosing a
+    // voice while assistance is off must not produce sound or open capture.
     await page.locator('#accessibility').click();
+    await page.locator('#theme-choice').selectOption('dark');
+    await page.locator('#contrast').check();
+    await page.locator('#dyslexia').check();
+    await page.locator('#reduce-motion').check();
+    await page.locator('#read-responses').uncheck();
+    await page.locator('#voice-choice').selectOption('mock-alternative');
+    await page.locator('#voice-rate').fill('1.2');
+    assert.equal(await page.locator('#voice-preview').isDisabled(), true);
+    await page.locator('#save-access').click();
+    for (const className of ['dark-mode', 'high-contrast', 'dyslexia-friendly', 'reduce-motion']) {
+      assert.equal(await page.locator('body').evaluate((body, name) => body.classList.contains(name), className), true);
+    }
+    await page.reload();
+    await page.waitForFunction(() => document.querySelector('#ai-enabled').disabled);
+    assert.equal(await page.evaluate(() => window.__mockVoice.instances.length), 0, 'Reload must not reactivate microphone');
+    assert.equal(await page.evaluate(() => window.__mockVoice.spoken.length), 0, 'Reload must stay quiet');
+    await page.locator('#accessibility').click();
+    assert.equal(await page.locator('#theme-choice').inputValue(), 'dark');
+    assert.equal(await page.locator('#voice-choice').inputValue(), 'mock-alternative');
+    assert.equal(await page.locator('#voice-rate').inputValue(), '1.2');
+    assert.equal(await page.locator('#read-responses').isChecked(), false);
+    assert.equal(await page.locator('#dyslexia').isChecked(), true);
+    assert.equal(await page.locator('#reduce-motion').isChecked(), true);
+    await page.locator('#theme-choice').selectOption('system');
+    await page.locator('#contrast').uncheck();
+    await page.locator('#dyslexia').uncheck();
+    await page.locator('#reduce-motion').uncheck();
+    await page.locator('#read-responses').check();
+    await page.locator('#save-access').click();
+    await page.locator('#accessibility').click();
+    assert.equal(await page.locator('#theme-choice').inputValue(), 'system');
+    await page.locator('#theme-choice').selectOption('light');
     await page.locator('#tts').check();
     await page.locator('#save-access').click();
     await waitListening(page);
@@ -246,21 +321,73 @@ async function run() {
     assert.equal(await page.evaluate(() => window.__mockVoice.active), false);
     await page.locator('#voice').click();
     await waitListening(page);
+    assert.equal(await page.evaluate(() => window.__mockVoice.instances.length), 1, 'Toggles must reuse one native recognizer');
+    assert.equal(await page.evaluate(() => window.__mockVoice.permissionQueries), 1, 'Saved microphone permission should be checked once');
+
+    await page.locator('#accessibility').click();
+    await page.locator('#voice-preview').click();
+    await page.waitForFunction(() => window.__mockVoice.utterances.some(item => item.text.includes('care guidance will sound')));
+    const preview = await page.evaluate(() => window.__mockVoice.utterances.at(-1));
+    assert.equal(preview.voiceURI, 'mock-alternative');
+    assert.equal(preview.rate, 1.2);
+    await page.locator('#save-access').click();
 
     await speak(page, 'Get me back to the start screen');
     assert.equal(await activePage(page), 'dashboard');
-    await speak(page, 'medical decoder');
+
+    // Mouse navigation with assistance on establishes the same input prompt
+    // as spoken navigation, including care-assistant question dictation.
+    await page.locator('[data-page="assistant"]').click();
+    await page.waitForFunction(() => /question|prompt|ask/i.test(window.__mockVoice.spoken.at(-1)));
+    const beforeVoiceChat = await page.locator('.chat-message.user').count();
+    await speak(page, 'How should I prepare for my appointment?');
+    await reviewReady(page, /prepare for my appointment/i);
+    assert.equal(await page.locator('.chat-message.user').count(), beforeVoiceChat, 'Dictated question must wait for confirmation');
+    await speak(page, 'read it again');
+    await reviewReady(page, /prepare for my appointment/i);
+    await confirmReview(page, 'yes');
+    await page.waitForFunction(count => document.querySelectorAll('.chat-message.user').length === count + 1, beforeVoiceChat);
+    await page.locator('#chat-input').fill('What is rheumatoid arthritis?');
+    await page.locator('#chat-form button').click();
+    await reviewReady(page, /rheumatoid arthritis/i);
+    assert.equal(await page.locator('.chat-message.user').count(), beforeVoiceChat + 1, 'Typed question must also wait while voice is on');
+    await page.locator('#review-edit').click();
+    assert.equal(await page.locator('#chat-input').inputValue(), 'What is rheumatoid arthritis?');
+    assert.equal(await page.evaluate(() => document.activeElement.id), 'chat-input');
+    await page.locator('#chat-input').fill('What is POTS?');
+    await page.locator('#chat-form button').click();
+    await reviewReady(page, /POTS/i);
+    await speak(page, 'cancel');
+    await page.locator('#review-dialog').waitFor({ state: 'hidden' });
+    assert.equal(await page.locator('.chat-message.user').count(), beforeVoiceChat + 1, 'Cancelled question must not send');
+
+    await page.locator('[data-page="decoder"]').click();
     assert.equal(await activePage(page), 'decoder');
+    await page.waitForFunction(() => /medical notes|notes.*explain/i.test(window.__mockVoice.spoken.at(-1)));
     const notesBeforeNoise = await page.locator('#medical-text').inputValue();
     await speak(page, 'Lets play Minecraft and find diamonds');
     assert.equal(await page.locator('#medical-text').inputValue(), notesBeforeNoise);
     await speak(page, 'tachycardia and hemoglobin');
+    await reviewReady(page, /tachycardia and hemoglobin/i);
+    assert.equal((await page.locator('#decode-result').textContent()).trim(), '', 'Dictated notes must not decode before confirmation');
+    await confirmReview(page, 'send it');
     await decodeReady(page);
     assert.match(await page.locator('#decode-result').textContent(), /red blood cells/i);
+    await page.locator('#medical-text').fill('CBC with low Hgb');
+    await page.locator('#decode').click();
+    await reviewReady(page, /CBC with low Hgb/i);
+    assert.equal((await page.locator('#decode-result').textContent()).trim(), '');
+    await page.locator('#review-confirm').click();
+    await decodeReady(page);
+    assert.match(await page.locator('#decode-result').textContent(), /hemoglobin|red blood cells/i);
     await speak(page, 'I need a doctor for diabetes');
     assert.equal(await activePage(page), 'specialists');
+    await reviewReady(page, /diabetes/i);
+    await confirmReview(page);
     assert.match(await selectedCondition(page), /diabetes/i);
     await speak(page, 'find a specialist for POTS');
+    await reviewReady(page, /POTS/i);
+    await confirmReview(page);
     assert.match(await selectedCondition(page), /POTS/i);
     assert.match(await page.locator('#specialist-results').textContent(), /Dysautonomia/i);
     await speak(page, 'add a task');
@@ -268,29 +395,103 @@ async function run() {
     await speak(page, 'Did you see that movie?');
     assert.equal(await page.locator('.task').count(), beforeVoiceTask);
     await speak(page, 'Arrange transportation');
+    await reviewReady(page, /Arrange transportation/i);
+    assert.equal(await page.locator('.task').count(), beforeVoiceTask, 'Dictated task must not be saved before review');
+    await confirmReview(page, 'save it');
+    await page.waitForFunction(count => document.querySelectorAll('.task').length === count + 1, beforeVoiceTask);
     assert.match(await page.locator('#checklist').textContent(), /Arrange transportation/);
+    await page.locator('#task-text').fill('Call my clinic about accessible parking');
+    await page.locator('#add-task button').click();
+    await reviewReady(page, /accessible parking/i);
+    assert.equal(await page.locator('.task').count(), beforeVoiceTask + 1);
+    await speak(page, 'change');
+    await page.locator('#review-dialog').waitFor({ state: 'hidden' });
+    assert.equal(await page.evaluate(() => document.activeElement.id), 'task-text');
+    assert.equal(await page.locator('.task').count(), beforeVoiceTask + 1);
+    await page.locator('#task-text').fill('Call my clinic about wheelchair access');
+    await page.locator('#add-task button').click();
+    await reviewReady(page, /wheelchair access/i);
+    await page.locator('#review-cancel').click();
+    assert.equal(await page.locator('.task').count(), beforeVoiceTask + 1);
+    await page.locator('#add-task button').click();
+    await confirmReview(page);
+    await page.waitForFunction(count => document.querySelectorAll('.task').length === count + 2, beforeVoiceTask);
     await speak(page, 'complete item two');
+    await confirmReview(page);
     assert.equal(await page.locator('.task input[type="checkbox"]').nth(1).isChecked(), true);
     await speak(page, 'read my checklist');
     assert.match(await page.evaluate(() => window.__mockVoice.spoken.at(-1)), /Item 1\./);
-    await speak(page, 'edit profile');
+    await page.locator('#profile').click();
+    await page.waitForFunction(() => /conditions.*selected|conditions.*change/i.test(window.__mockVoice.spoken.at(-1)));
     await speak(page, 'Long COVID');
     await speak(page, 'save profile');
+    await reviewReady(page, /Long COVID/i);
+    await speak(page, 'change');
+    await page.locator('#review-dialog').waitFor({ state: 'hidden' });
+    assert.equal(await page.evaluate(() => document.activeElement.id), 'profile-search');
+    await speak(page, 'migraine');
+    assert.equal(await page.locator('#settings-dialog').isVisible(), true, 'Profile edits must stay in the profile dialog');
+    assert.doesNotMatch(await page.locator('#condition-chips').textContent(), /migraine/i, 'Profile edits must wait for save confirmation');
+    await speak(page, 'save profile');
+    await reviewReady(page, /migraine/i);
+    await confirmReview(page);
     assert.match(await page.locator('#condition-chips').textContent(), /Long COVID/);
+    assert.match(await page.locator('#condition-chips').textContent(), /migraine/i);
     await speak(page, 'accessibility settings');
     await speak(page, 'larger text on');
     assert.equal(await page.locator('body').evaluate(body => body.classList.contains('large-text')), true);
     await speak(page, 'larger text off');
+    await speak(page, 'dyslexia on');
+    assert.equal(await page.locator('body').evaluate(body => body.classList.contains('dyslexia-friendly')), true);
+    await speak(page, 'dyslexia off');
+    await speak(page, 'reduce motion on');
+    assert.equal(await page.locator('body').evaluate(body => body.classList.contains('reduce-motion')), true);
+    await speak(page, 'reduce motion off');
     await speak(page, 'save preferences');
     await speak(page, 'prepare my checklist');
+    await reviewReady(page, /visit focus/i);
+    await speak(page, 'change');
+    await page.locator('#review-dialog').waitFor({ state: 'hidden' });
+    assert.equal(await page.evaluate(() => document.activeElement.id), 'plan-concern');
+    const beforeChangedConcern = await page.locator('#plan-suggestions').textContent();
+    await speak(page, 'I am exhausted from playing Minecraft');
+    assert.equal(await page.locator('#plan-suggestions').textContent(), beforeChangedConcern);
+    await speak(page, 'I feel exhausted after my medication');
+    await reviewReady(page, /exhausted after my medication/i);
+    assert.equal(await page.locator('#plan-concern').inputValue(), 'I feel exhausted after my medication');
+    assert.equal(await page.locator('#plan-suggestions').textContent(), beforeChangedConcern, 'Edited concern must not build a plan before confirmation');
+    await confirmReview(page);
     await page.locator('#plan-apply').waitFor({ state: 'visible' });
+    assert.match(await page.locator('#plan-suggestions').textContent(), /exhausted after my medication/i);
     await speak(page, 'track my symptoms');
     assert.equal(await page.evaluate(() => document.activeElement.id), 'symptom-name');
 
+    await page.locator('#accessibility').click();
+    await page.locator('#read-responses').uncheck();
+    await page.locator('#save-access').click();
+    await page.locator('[data-page="assistant"]').click();
+    await waitListening(page);
+    await page.locator('#chat-input').fill('Help me prepare for a medication review');
+    await page.locator('#chat-form button').click();
+    await reviewReady(page, /medication review/i);
+    await waitListening(page);
+    const beforeMutedReply = await page.evaluate(() => window.__mockVoice.spoken.length);
+    await page.locator('#review-confirm').click();
+    await page.waitForFunction(() => !document.querySelector('#chat-form button').disabled);
+    assert.equal(await page.evaluate(() => window.__mockVoice.spoken.length), beforeMutedReply, 'Disabling read responses should leave results silent');
+    await page.locator('#accessibility').click();
+    await page.locator('#read-responses').check();
+    await page.locator('#save-access').click();
+
     // No result from the old recognition session can execute while read-aloud
     // is active. The explicit Interrupt control resumes capture immediately.
+    await page.locator('#chat-input').fill('What is POTS?');
+    await page.locator('#chat-form button').click();
+    await reviewReady(page, /POTS/i);
+    await waitListening(page);
     await page.evaluate(() => { window.__speechDuration = 100000; });
-    await speak(page, 'What is POTS?');
+    await page.locator('#review-confirm').click();
+    await page.locator('#review-dialog').waitFor({ state: 'hidden' });
     await page.waitForFunction(() => window.speechSynthesis.speaking);
     assert.equal(await page.evaluate(() => window.__mockVoice.active), false);
     const duringSpeechPage = await activePage(page);
@@ -330,6 +531,38 @@ async function run() {
     assert.equal(await activePage(page), 'dashboard');
     await page.locator('#voice-wake').uncheck();
     assert.equal(await page.evaluate(() => window.__mockVoice.active), false);
+    assert.equal(await page.evaluate(() => window.__mockVoice.instances.length), 1, 'Replies and wake listening must reuse the same native object');
+    assert.equal(await page.evaluate(() => window.__mockVoice.permissionQueries), 1, 'Spoken replies must not re-request saved microphone permission');
+
+    // Policies are reachable throughout the site and data clearing is always
+    // reviewed before any stored personal records are removed.
+    for (const [kind, title] of [
+      ['terms', /terms of use/i], ['privacy', /privacy policy/i],
+      ['accessibility', /accessibility/i], ['help', /help.*feedback/i]
+    ]) {
+      await page.locator(`[data-policy="${kind}"]`).click();
+      assert.match(await page.locator('#dialog-title').textContent(), title);
+      assert.ok((await page.locator('#dialog-content').textContent()).length > 200);
+      await page.locator('.dialog-close').click();
+    }
+    const beforeReset = await storedTaskCount(page);
+    assert.ok(beforeReset > 0);
+    await page.locator('#accessibility').click();
+    await page.locator('#reset-data').click();
+    await reviewReady(page, /clear|delete|remove/i);
+    assert.equal(await storedTaskCount(page), beforeReset);
+    await page.locator('#review-cancel').click();
+    assert.equal(await storedTaskCount(page), beforeReset, 'Cancelled reset must keep records');
+    if (!await page.locator('#settings-dialog').isVisible()) await page.locator('#accessibility').click();
+    await page.locator('#reset-data').click();
+    await reviewReady(page, /clear|delete|remove/i);
+    const resetNavigation = page.waitForEvent('framenavigated', frame => frame === page.mainFrame());
+    await page.locator('#review-confirm').click();
+    await resetNavigation;
+    await page.waitForLoadState();
+    assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem('care-symptoms') || '[]').length), 0);
+    assert.equal(await page.evaluate(() => localStorage.getItem('care-visit')), null);
+    if (await page.locator('#settings-dialog').isVisible()) await page.locator('.dialog-close').click();
 
     for (const width of [1440, 1024, 800, 650, 390, 320]) {
       await page.setViewportSize({ width, height: 900 });
@@ -380,7 +613,7 @@ async function run() {
     assert.match(await storagePage.locator('#checklist').textContent(), /Still works without storage/);
     assert.deepEqual(storageErrors, []);
     await storageContext.close();
-    console.log('Chromium smoke passed: quiet startup, optional AI, decoder/files, specialist search, checklist/symptoms/export, assistant, voice/wake/noise/echo, permission handling, blocked storage, and responsive layouts.');
+    console.log('Chromium smoke passed: quiet startup, automatic/local AI, decoder/files, broad specialist search, checklist/symptoms/export, settings persistence, policies/data reset, confirmed voice/typed input, recognizer reuse, voice/wake/noise/echo, permission handling, blocked storage, and responsive layouts.');
   } finally {
     await browser?.close();
     await server.close();

@@ -1,11 +1,11 @@
-/* Optional AI stays behind an explicit choice. The API key belongs to the server. */
+/* A configured server connects AI automatically. A saved off choice is respected. */
 (function (window) {
   'use strict';
   let available = false;
-  let consent = false;
+  let consent = true;
   let consentVersion = 0;
   const activeRequests = new Set();
-  try { consent = window.localStorage.getItem('care-ai-enabled') === 'true'; } catch { /* This visit still works. */ }
+  try { consent = window.localStorage.getItem('care-ai-enabled') !== 'false'; } catch { /* This visit still works. */ }
 
   function render(detail) {
     const checkbox = window.document.querySelector('#ai-enabled');
@@ -17,8 +17,8 @@
     }
     if (status) {
       status.textContent = detail || (available ?
-        (consent ? 'AI connected. Text you submit is sent to OpenAI.' : 'AI is ready. Enable it to use AI assistance.') :
-        'Using local tools. AI is not connected.');
+        (consent ? 'AI enabled automatically. Text you submit is sent to OpenAI.' : 'AI is off by your choice. The local tools are available.') :
+        'Using local tools. AI will connect automatically when the server is configured.');
     }
   }
 
@@ -79,5 +79,5 @@
     get available() { return available; },
     get enabled() { return available && consent; }
   };
-  render('Checking optional AI connection…');
+  render('Checking the automatic AI connection…');
 })(window);

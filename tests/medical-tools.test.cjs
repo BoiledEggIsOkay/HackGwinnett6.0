@@ -75,3 +75,103 @@ test('condition library covers broad specialties with public HTTPS resources', (
   }
   assert.equal(new Set(Array.from(medical.conditions, entry => entry.id)).size, medical.conditions.length);
 });
+
+test('specialist search understands doctor titles, multiword order, aliases and small spelling mistakes', () => {
+  for (const [query, id] of [
+    ['rheumatoid arthritis', 'ra'], ['arthritis rheumatoid', 'ra'], ['rheumatoid arthrits', 'ra'],
+    ['migriane', 'migraine'], ['Céliac', 'celiac'], ['Crohn’s disease', 'crohns'],
+    ['multiple-sclerosis', 'ms'], ['MS', 'ms'], ['RA', 'ra'], ['migraines', 'migraine'],
+    ['asthma pulmonologist', 'asthma'], ['kidney doctor', 'kidney']
+  ]) {
+    assert.equal(medical.searchConditions(query)[0]?.id, id, query);
+  }
+  for (const query of ['cardiologist', 'cardioligist', 'heart doctor']) {
+    const results = Array.from(medical.searchConditions(query));
+    assert.ok(results.some(entry => entry.id === 'heart'), query);
+    assert.ok(results.every(entry => entry.specialties.includes('cardiology')), query);
+  }
+  for (const query of ['dermatologist', 'skin doctor']) {
+    assert.ok(Array.from(medical.searchConditions(query)).every(entry => entry.specialties.includes('dermatology')), query);
+  }
+});
+
+test('search does not guess unsupported conditions or confuse similar specialty names', () => {
+  assert.equal(medical.searchConditions('unlisted condition xyz').length, 0);
+  assert.equal(medical.searchConditions('ENT').length, 0);
+  assert.deepEqual(Array.from(medical.searchConditions('nephrology'), entry => entry.id), ['kidney']);
+  assert.deepEqual(Array.from(medical.searchConditions('IBD'), entry => entry.id), ['ibd']);
+  assert.equal(medical.searchConditions('').length, medical.conditions.length);
+  // Search suggestions do not weaken exact medical text matching.
+  assert.equal(medical.matchConditions('migriane').length, 0);
+});
+
+function decoderBrowser(config = {}) {
+  class Element {
+    constructor() { this.value = ''; this.disabled = false; this.hidden = false; this.children = []; this.attributes = {}; this.listeners = {}; }
+    append(...nodes) { this.children.push(...nodes); }
+    replaceChildren(...nodes) { this.children = [...nodes]; }
+    setAttribute(name, value) { this.attributes[name] = value; }
+    removeAttribute(name) { delete this.attributes[name]; }
+    addEventListener(name, callback) { this.listeners[name] = callback; }
+    focus() {}
+  }
+  const nodes = Object.fromEntries(['#medical-text', '#decode', '#decode-result', '#decoder-save'].map(selector => [selector, new Element()]));
+  const window = { document: { querySelector: selector => nodes[selector] || null, createElement: () => new Element() } };
+  const local = vm.createContext({ window });
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '../medical-tools.js'), 'utf8'), local);
+  window.CareMedical.init(config);
+  return { nodes, medical: window.CareMedical };
+}
+
+test('decoder asks for review before making an AI request or showing an explanation', async () => {
+  let calls = 0;
+  let approve;
+  const b = decoderBrowser({
+    review: details => {
+      assert.equal(details.field, '#medical-text');
+      assert.equal(details.summary, 'Hgb 10.5');
+      return new Promise(resolve => { approve = resolve; });
+    },
+    ai: async () => { calls++; return { text: 'Reviewed explanation.' }; }
+  });
+  b.nodes['#medical-text'].value = 'Hgb 10.5';
+  const pending = b.medical.decode();
+  assert.equal(calls, 0);
+  assert.equal(b.nodes['#decode-result'].children.length, 0);
+  approve(false);
+  assert.equal(await pending, false);
+  assert.equal(calls, 0);
+  assert.equal(b.nodes['#decode'].disabled, false);
+});
+
+test('changing notes during a review cancels the old submission', async () => {
+  let calls = 0;
+  let approve;
+  const b = decoderBrowser({
+    review: () => new Promise(resolve => { approve = resolve; }),
+    ai: async () => { calls++; return { text: 'Old explanation.' }; }
+  });
+  b.nodes['#medical-text'].value = 'Hgb 10.5';
+  const pending = b.medical.decode();
+  b.nodes['#medical-text'].value = 'TSH 4.8';
+  b.nodes['#medical-text'].listeners.input();
+  approve(true);
+  assert.equal(await pending, false);
+  assert.equal(calls, 0);
+  assert.equal(b.nodes['#decode'].disabled, false);
+});
+
+test('a follow-up question is not saved until its review is confirmed', async () => {
+  let approved = true;
+  const tasks = [];
+  const b = decoderBrowser({ review: async () => approved, addTask: text => tasks.push(text) });
+  b.nodes['#medical-text'].value = 'CBC and Hgb 10.5';
+  assert.equal(await b.medical.decode(), true);
+  approved = false;
+  await b.nodes['#decoder-save'].onclick();
+  assert.equal(tasks.length, 0);
+  approved = true;
+  await b.nodes['#decoder-save'].onclick();
+  assert.equal(tasks.length, 1);
+  assert.match(tasks[0], /hemoglobin|CBC/);
+});

@@ -132,6 +132,8 @@
     const button = $('#plan-build');
     const template = $('#plan-template').value;
     const concern = $('#plan-concern').value.trim();
+    if (options.review && !await options.review({ title: 'Prepare this visit checklist?', summary: `Visit focus: ${$('#plan-template').selectedOptions[0].textContent}\nMain concern: ${concern || 'No extra concern entered'}`, actionLabel: 'Prepare checklist', field: $('#plan-concern') })) return;
+    if (version !== planVersion || $('#plan-concern').value.trim() !== concern || $('#plan-template').value !== template) return;
     let items = [...(templates[template] || templates.general)];
     if (concern) items.unshift(`Discuss my main concern: ${concern}`);
     button.disabled = true;
@@ -186,8 +188,8 @@
     }
     if (/\b(?:specialist|doctor|find|referral)\b/i.test(text) && !/\b(?:visit|prepare|appointment)\b/i.test(text)) {
       return conditions.length ?
-        `For ${conditions[0].name}, relevant specialties can include ${conditions[0].specialties.join(', ')}. Find a specialist has condition resources and location search links. Ask about experience, referral requirements, insurance, accessibility, and wait times before booking.` :
-        'Find a specialist includes a searchable condition library, specialty suggestions, trusted resources, and location search links. Ask your primary care clinician which specialty fits your concern. Confirm the provider’s experience, availability, insurance, and accessibility directly with the office.';
+        `For ${conditions[0].name}, relevant specialties can include ${conditions[0].specialties.join(', ')}. Find a specialist has condition resources and clinician directories. Ask about experience, referral requirements, insurance, accessibility, and wait times before booking.` :
+        'Find a specialist includes a searchable condition library, specialty suggestions, trusted resources, and clinician directory links. Ask your primary care clinician which specialty fits your concern. Confirm the provider’s experience, availability, insurance, and accessibility directly with the office.';
     }
     if (/\b(?:visit|prepare|appointment|question|checklist)\b/i.test(text)) {
       return 'Start with the concern you most want addressed. Write down when symptoms began, what makes them better or worse, and how they affect daily life. Bring medicines, previous results, and accessibility requests. In My care plan, choose a visit template to create a checklist. Ask: What are the possible causes? What is the next step? When should I follow up?';
@@ -200,6 +202,10 @@
   async function chat(text) {
     if (!text?.trim()) return;
     const version = chatVersion;
+    $('#chat-input').value = text;
+    if (options.review && !await options.review({ title: 'Send this prompt to your care assistant?', summary: text, actionLabel: 'Send prompt', field: $('#chat-input') })) return;
+    if (version !== chatVersion || $('#chat-input').value !== text) return;
+    $('#chat-input').value = '';
     const user = document.createElement('div');
     user.className = 'chat-message user';
     user.textContent = text;
@@ -235,7 +241,9 @@
       action.type = 'button';
       action.className = 'secondary chat-action';
       action.textContent = 'Add this question to my checklist';
-      action.onclick = () => {
+      action.onclick = async () => {
+        if (options.review && !await options.review({ title: 'Save this visit question?', summary: text, actionLabel: 'Save question' })) return;
+        if (version !== chatVersion || action.disabled) return;
         options.addTask(`Ask my care team: ${text.slice(0, 400)}`);
         action.disabled = true;
         action.textContent = 'Added to my care plan';
@@ -245,7 +253,7 @@
     }
     history.push({ role: 'assistant', content: reply });
     history = history.slice(-10);
-    bot.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    bot.scrollIntoView({ behavior: window.CareSettings?.preferences.motion || window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'nearest' });
     options.speak(reply);
   }
 
@@ -261,25 +269,32 @@
     $('#visit-clinician').value = visit.clinician || '';
     const date = new Date();
     $('#symptom-date').value = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
-    $('#visit-form').onsubmit = event => {
+    $('#visit-form').onsubmit = async event => {
       event.preventDefault();
-      visit = { date: $('#visit-date').value, clinician: $('#visit-clinician').value.trim() };
+      const details = { date: $('#visit-date').value, clinician: $('#visit-clinician').value.trim() };
+      if (options.review && !await options.review({ title: 'Save these appointment details?', summary: `${details.date || 'No date entered'} · ${details.clinician || 'No office entered'}`, actionLabel: 'Save appointment', field: $('#visit-clinician') })) return;
+      if ($('#visit-date').value !== details.date || $('#visit-clinician').value.trim() !== details.clinician) return;
+      visit = details;
       options.save('care-visit', visit);
       $('#visit-saved').textContent = 'Appointment details saved on this device.';
       options.toast('Appointment details saved.');
     };
-    $('#symptom-form').onsubmit = event => {
+    $('#symptom-form').onsubmit = async event => {
       event.preventDefault();
       const symptom = $('#symptom-name').value.trim();
       if (!symptom || !$('#symptom-date').value) return;
       const severity = Number($('#symptom-severity').value);
       if (!Number.isFinite(severity) || severity < 0 || severity > 10) return;
+      const date = $('#symptom-date').value;
+      const notes = $('#symptom-notes').value.trim();
+      if (options.review && !await options.review({ title: 'Save this symptom record?', summary: `${symptom}\n${date} · severity ${severity}/10\n${notes || 'No triggers or impact entered'}`, actionLabel: 'Save record', field: $('#symptom-name') })) return;
+      if ($('#symptom-name').value.trim() !== symptom || $('#symptom-date').value !== date || Number($('#symptom-severity').value) !== severity || $('#symptom-notes').value.trim() !== notes) return;
       symptoms.push({
         id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
-        date: $('#symptom-date').value,
+        date,
         symptom,
         severity,
-        notes: $('#symptom-notes').value.trim()
+        notes
       });
       options.save('care-symptoms', symptoms);
       $('#symptom-name').value = '';
@@ -288,12 +303,16 @@
       options.toast('Symptom added to your record.');
     };
     $('#plan-build').onclick = buildPlan;
-    $('#plan-apply').onclick = () => {
+    $('#plan-apply').onclick = async () => {
       const selected = [...$('#plan-suggestions').querySelectorAll('input')];
+      const chosen = proposedTasks.filter((_, index) => selected[index]?.checked);
+      const version = planVersion;
+      if (options.review && !await options.review({ title: 'Save these checklist questions?', summary: chosen.join('\n') || 'No questions selected', actionLabel: 'Save questions' })) return;
+      if (version !== planVersion) return;
       let count = 0;
-      selected.forEach((input, index) => {
-        if (input.checked && !options.getTasks().some(task => task.text === proposedTasks[index])) {
-          options.addTask(proposedTasks[index]);
+      chosen.forEach(text => {
+        if (!options.getTasks().some(task => task.text === text)) {
+          options.addTask(text);
           count++;
         }
       });

@@ -4,11 +4,11 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 
-function client({ available = true, saved = false, blockedStorage = false } = {}) {
+function client({ available = true, saved, blockedStorage = false } = {}) {
   const calls = [];
   const checkbox = {};
   const status = {};
-  const values = new Map([['care-ai-enabled', String(saved)]]);
+  const values = new Map(saved === undefined ? [] : [['care-ai-enabled', String(saved)]]);
   const window = {
     document: { querySelector: selector => selector === '#ai-enabled' ? checkbox : status },
     localStorage: {
@@ -30,19 +30,16 @@ function client({ available = true, saved = false, blockedStorage = false } = {}
   return { ai: window.CareAI, window, calls, checkbox, status, values };
 }
 
-test('AI availability does not enable requests without an explicit choice', async () => {
+test('a configured server enables AI automatically without a saved preference', async () => {
   const c = client();
   await c.ai.ready;
   assert.equal(c.ai.available, true);
-  assert.equal(c.ai.enabled, false);
-  assert.equal(c.checkbox.checked, false);
-  assert.match(c.status.textContent, /Enable it/);
-  await assert.rejects(c.ai.request('assistant', { text: 'Help me prepare.' }), /AI is off/);
-  assert.equal(c.calls.length, 1);
-  c.ai.setEnabled(true);
   assert.equal(c.ai.enabled, true);
-  assert.equal(c.values.get('care-ai-enabled'), 'true');
+  assert.equal(c.checkbox.checked, true);
+  assert.match(c.status.textContent, /automatically/);
+  assert.equal(c.values.has('care-ai-enabled'), false);
   assert.match(c.status.textContent, /sent to OpenAI/);
+  assert.equal(c.calls.length, 1, 'Automatic connection checks availability without submitting any input');
   const result = await c.ai.request('assistant', { text: 'Help me prepare.' });
   assert.equal(result.text, 'Bring your questions.');
   assert.equal(c.calls[1].url, '/api/ai');
@@ -50,6 +47,20 @@ test('AI availability does not enable requests without an explicit choice', asyn
   c.ai.setEnabled(false);
   await assert.rejects(c.ai.request('assistant', { text: 'More help.' }), /AI is off/);
   assert.equal(c.calls.length, 2);
+});
+
+test('a saved off choice prevents automatic requests until explicitly enabled', async () => {
+  const c = client({ saved: false });
+  await c.ai.ready;
+  assert.equal(c.ai.available, true);
+  assert.equal(c.ai.enabled, false);
+  assert.equal(c.checkbox.checked, false);
+  assert.match(c.status.textContent, /off by your choice/);
+  await assert.rejects(c.ai.request('assistant', { text: 'Help me prepare.' }), /AI is off/);
+  assert.equal(c.calls.length, 1);
+  c.ai.setEnabled(true);
+  assert.equal(c.values.get('care-ai-enabled'), 'true');
+  assert.equal((await c.ai.request('assistant', { text: 'Help me prepare.' })).text, 'Bring your questions.');
 });
 
 test('unconfigured AI stays disabled even with a previously saved preference', async () => {
@@ -64,10 +75,13 @@ test('unconfigured AI stays disabled even with a previously saved preference', a
   assert.equal(c.calls.length, 1);
 });
 
-test('blocked storage does not break the explicit per-visit AI choice', async () => {
+test('blocked storage still allows automatic AI and a per-visit off choice', async () => {
   const c = client({ blockedStorage: true });
   await c.ai.ready;
+  assert.equal(c.ai.enabled, true);
+  c.ai.setEnabled(false);
   assert.equal(c.ai.enabled, false);
+  await assert.rejects(c.ai.request('plan', { text: 'Prepare for my visit.' }), /AI is off/);
   c.ai.setEnabled(true);
   assert.equal(c.ai.enabled, true);
   assert.equal((await c.ai.request('plan', { text: 'Prepare for my visit.' })).text, 'Bring your questions.');

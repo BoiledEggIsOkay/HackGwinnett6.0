@@ -217,7 +217,109 @@
   ];
 
   function normalize(text) {
-    return String(text || '').toLowerCase().replace(/[’']/g, '').replace(/[^a-z0-9+]+/g, ' ').replace(/\s+/g, ' ').trim();
+    return String(text || '').normalize('NFKD').replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase().replace(/[’']/g, '').replace(/[^a-z0-9+]+/g, ' ').replace(/\s+/g, ' ').trim();
+  }
+  const searchAliases = {
+    ms: ['ms'], ra: ['ra'], thyroid: ['hashimotos', 'graves', 'underactive thyroid', 'overactive thyroid'],
+    crohns: ['crohn disease'], longcovid: ['post covid syndrome', 'postcovid', 'longcovid'],
+    hsd: ['hypermobile', 'hypermobility'], eds: ['connective tissue disorder'],
+    hypertension: ['blood pressure high'], sleep: ['obstructive sleep apnea'],
+    chronicpain: ['pain management'], cancer: ['cancer treatment'],
+    anxiety: ['mental health'], depression: ['mental health'],
+    arthritis: ['joint degeneration'], 'arthritis-general': ['joint inflammation']
+  };
+  const specialtyWords = {
+    cardiologist: 'cardiology', cardiologists: 'cardiology',
+    neurologist: 'neurology', neurologists: 'neurology',
+    rheumatologist: 'rheumatology', rheumatologists: 'rheumatology',
+    dermatologist: 'dermatology', dermatologists: 'dermatology',
+    endocrinologist: 'endocrinology', endocrinologists: 'endocrinology',
+    gastroenterologist: 'gastroenterology', gastroenterologists: 'gastroenterology',
+    nephrologist: 'nephrology', nephrologists: 'nephrology',
+    pulmonologist: 'pulmonology', pulmonologists: 'pulmonology',
+    gynecologist: 'gynecology', gynecologists: 'gynecology', gynaecologist: 'gynecology',
+    psychiatrist: 'psychiatry', psychiatrists: 'psychiatry',
+    psychologist: 'psychology', psychologists: 'psychology',
+    oncologist: 'oncology', oncologists: 'oncology',
+    allergist: 'allergy', allergists: 'allergy', immunologist: 'immunology',
+    hematologist: 'hematology', haematologist: 'hematology',
+    genetics: 'genetics', geneticist: 'genetics',
+    orthopaedics: 'orthopedics', orthopaedic: 'orthopedics', orthopedic: 'orthopedics',
+    paediatrics: 'pediatrics', pediatrician: 'pediatrics',
+    physiotherapy: 'physical therapy', physiotherapist: 'physical therapy',
+    dietician: 'dietitian', dieticians: 'dietitian', dietitians: 'dietitian'
+  };
+  function searchQuery(text) {
+    return normalize(text)
+      .replace(/\b(?:heart doctor|heart specialist)\b/g, 'cardiology')
+      .replace(/\b(?:skin doctor|skin specialist)\b/g, 'dermatology')
+      .replace(/\b(?:lung doctor|lung specialist)\b/g, 'pulmonology')
+      .replace(/\b(?:joint doctor|joint specialist)\b/g, 'rheumatology')
+      .replace(/\b(?:brain doctor|nerve doctor)\b/g, 'neurology')
+      .replace(/\b(?:stomach doctor|digestive specialist)\b/g, 'gastroenterology')
+      .replace(/\b(?:kidney doctor|kidney specialist)\b/g, 'nephrology')
+      .replace(/\b(?:family doctor|family medicine|general practitioner|gp)\b/g, 'primary care')
+      .replace(/\b(?:i|have|need|want|find|help|me|my|a|an|the|for|with|who|treats|specialist|specialists|doctor|doctors|physician|physicians|please)\b/g, ' ')
+      .split(/\s+/).filter(Boolean).map(word => {
+        if (specialtyWords[word]) return specialtyWords[word];
+        if (word.length >= 8) {
+          const close = Object.keys(specialtyWords).find(title => wordDistance(word, title) <= 1);
+          if (close) return specialtyWords[close];
+        }
+        return word;
+      }).join(' ');
+  }
+  function wordDistance(a, b) {
+    if (Math.abs(a.length - b.length) > 2) return 3;
+    let row = Array.from({ length: b.length + 1 }, (_, index) => index);
+    for (let index = 1; index <= a.length; index++) {
+      const next = [index];
+      for (let other = 1; other <= b.length; other++) {
+        next[other] = Math.min(next[other - 1] + 1, row[other] + 1,
+          row[other - 1] + (a[index - 1] === b[other - 1] ? 0 : 1));
+      }
+      row = next;
+    }
+    return row[b.length];
+  }
+  function wordScore(query, word) {
+    if (query === word) return 10;
+    if (query.length >= 3 && word.startsWith(query)) return 7;
+    if (query.length >= 5 && word.length >= 5) {
+      const distance = wordDistance(query, word);
+      const different = query.length === word.length ?
+        [...query].flatMap((letter, index) => letter === word[index] ? [] : [index]) : [];
+      const transposed = different.length === 2 && different[1] === different[0] + 1 &&
+        query[different[0]] === word[different[1]] && query[different[1]] === word[different[0]];
+      if (distance <= 1 || transposed) return 4;
+    }
+    return 0;
+  }
+  function searchConditions(text) {
+    const query = searchQuery(text).slice(0, 250);
+    if (!query) return conditions.slice();
+    const words = query.split(' ');
+    return conditions.map((entry, index) => {
+      let score = 0;
+      const fields = [
+        ...[entry.name, ...entry.aliases, ...(searchAliases[entry.id] || [])].map(value => ({ value, weight: 30 })),
+        ...entry.specialties.map(value => ({ value, weight: 15 }))
+      ];
+      fields.forEach(({ value, weight }) => {
+        const candidate = normalize(value);
+        if (candidate === query) score = Math.max(score, 100 + weight);
+        else if (query.length >= 3 && (` ${candidate}`).includes(` ${query}`)) score = Math.max(score, 65 + weight);
+        const candidateWords = candidate.split(' ');
+        const matches = words.map(word => Math.max(...candidateWords.map(candidateWord => wordScore(word, candidateWord))));
+        if (matches.every(Boolean)) score = Math.max(score, weight + matches.reduce((sum, match) => sum + match, 0));
+      });
+      const allWords = fields.flatMap(field => normalize(field.value).split(' '));
+      const combined = words.map(word => Math.max(...allWords.map(candidateWord => wordScore(word, candidateWord))));
+      if (combined.every(Boolean)) score = Math.max(score, 10 + combined.reduce((sum, match) => sum + match, 0));
+      return { entry, score, index };
+    }).filter(result => result.score > 0)
+      .sort((a, b) => b.score - a.score || a.index - b.index).map(result => result.entry);
   }
   function matchConditions(text) {
     const value = normalize(text);
@@ -265,8 +367,16 @@
   let fileVersion = 0;
   let specialistVersion = 0;
   let lastExplanation = '';
+  let searchTerm = '';
+  let searchFallback = false;
+  let searchCount = conditions.length;
   const $ = selector => window.document.querySelector(selector);
   const notify = text => options.toast?.(text);
+  async function reviewInput(details) {
+    if (!options.review) return true;
+    try { return await options.review(details) === true; }
+    catch { notify('The review was cancelled. Your input has not been submitted.'); return false; }
+  }
   function appendText(holder, text, tag = 'p', className = '') {
     const node = window.document.createElement(tag);
     node.textContent = text;
@@ -312,6 +422,15 @@
     const version = ++decodeVersion;
     const result = $('#decode-result');
     const button = $('#decode');
+    button.disabled = true;
+    if (options.review) {
+      const approved = await reviewInput({
+        title: 'Review your medical notes', summary: text, actionLabel: 'Explain notes', field: '#medical-text'
+      });
+      if (version !== decodeVersion) return false;
+      if ($('#medical-text').value.trim() !== text) { clearExplanation(); return false; }
+      if (!approved) { button.disabled = false; return false; }
+    }
     result.replaceChildren();
     result.setAttribute('aria-busy', 'true');
     appendText(result, 'Reading your notes…');
@@ -332,7 +451,8 @@
     } catch {
       source = 'Local glossary · AI could not respond, so matching terms are explained below';
     }
-    if (version !== decodeVersion || $('#medical-text').value.trim() !== text) return false;
+    if (version !== decodeVersion) return false;
+    if ($('#medical-text').value.trim() !== text) { clearExplanation(); return false; }
     renderExplanation(explanation, source);
     result.removeAttribute('aria-busy');
     button.disabled = false;
@@ -385,16 +505,23 @@
     specialistVersion += 1;
     const holder = $('#specialist-results');
     if (!holder) return;
-    if ($('#specialty')?.disabled && !$('#specialty').options.length) return;
+    if ($('#specialist-save')) $('#specialist-save').disabled = false;
     holder.replaceChildren();
+    if (searchFallback) {
+      appendText(holder, `“${searchTerm}” is not in this condition library. You can still use these general resources or search a public clinician directory.`, 'p');
+      appendLink(holder, resource('Search Healthgrades', `Search the public directory for “${searchTerm}”. Listings require direct verification of condition experience, insurance, and availability.`, `https://www.healthgrades.com/usearch?what=${encodeURIComponent(searchTerm)}`));
+      appendLink(holder, resource('Search MedlinePlus health information', 'Look up patient information from the U.S. National Library of Medicine. This is a health information search, not a provider recommendation.', `https://vsearch.nlm.nih.gov/vivisimo/cgi-bin/query-meta?v%3Aproject=medlineplus&query=${encodeURIComponent(searchTerm)}`));
+      conditions.find(entry => entry.id === 'other').resources.forEach(item => appendLink(holder, item));
+      if ($('#specialist-ai')) $('#specialist-ai').disabled = false;
+      return;
+    }
+    if (searchTerm) appendText(holder, `Showing ${searchCount} possible condition or specialty ${searchCount === 1 ? 'match' : 'matches'} for “${searchTerm}”. Choose the entry that fits your existing care needs; search results do not establish a diagnosis.`, 'p', 'tool-source');
     const entry = selectedCondition();
     appendText(holder, entry.summary, 'p');
     appendText(holder, `Specialties to discuss with your clinician: ${entry.specialties.join(', ')}.`, 'p', 'specialty-summary');
     entry.resources.forEach(item => appendLink(holder, item));
     const primary = entry.specialties[0];
     appendLink(holder, resource('Healthgrades clinician search', `Search a general clinician directory for ${primary}. Verify condition experience and insurance directly.`, `https://www.healthgrades.com/usearch?what=${encodeURIComponent(primary)}`));
-    const location = $('#specialist-location')?.value.trim();
-    if (location) appendLink(holder, resource(`Search ${primary} near ${location}`, 'Opens a Google Maps search. These are search results, not verified recommendations.', `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${primary} near ${location}`)}`));
     const note = window.document.createElement('div');
     note.className = 'plan-note';
     appendText(note, 'Before booking, ask: Do you have experience with my condition? Are you accepting new patients and my insurance? Is a referral required? Can you offer accessible or virtual visits?');
@@ -402,11 +529,22 @@
     if ($('#specialist-ai')) $('#specialist-ai').disabled = false;
   }
   function chooseSpecialty(text) {
-    const entry = matchConditions(text)[0];
+    let entry = matchConditions(text)[0];
+    if (!entry) {
+      const possibilities = searchConditions(text);
+      const queryWords = searchQuery(text).split(' ');
+      if (possibilities.length === 1 && [possibilities[0].name, ...possibilities[0].aliases, ...(searchAliases[possibilities[0].id] || [])]
+          .some(alias => queryWords.every(word => normalize(alias).split(' ').some(candidate => wordScore(word, candidate) > 0)))) {
+        entry = possibilities[0];
+      }
+    }
     if (!entry || !$('#specialty')) return false;
     // A voice selection may have been excluded by a previous typed filter.
     const search = $('#specialist-search');
     if (search) search.value = '';
+    searchTerm = '';
+    searchFallback = false;
+    searchCount = conditions.length;
     populateConditions(conditions, entry.id);
     renderDirectory();
     return true;
@@ -423,8 +561,10 @@
     });
   }
   function filterConditions() {
-    const query = normalize($('#specialist-search').value);
-    const list = conditions.filter(entry => !query || [entry.name, ...entry.aliases, ...entry.specialties].some(value => normalize(value).includes(query)));
+    searchTerm = $('#specialist-search').value.trim().slice(0, 250);
+    const list = searchConditions(searchTerm);
+    searchCount = list.length;
+    searchFallback = !list.length;
     if (list.length) {
       populateConditions(list);
       $('#specialty').disabled = false;
@@ -432,13 +572,11 @@
       if ($('#specialist-ai')) $('#specialist-ai').disabled = false;
       renderDirectory();
     } else {
-      specialistVersion += 1;
-      $('#specialty').replaceChildren();
-      $('#specialty').disabled = true;
-      if ($('#specialist-save')) $('#specialist-save').disabled = true;
-      if ($('#specialist-ai')) $('#specialist-ai').disabled = true;
-      $('#specialist-results').replaceChildren();
-      appendText($('#specialist-results'), 'No matching condition or specialty in this library. Try a broader term such as “heart,” “pain,” or “other.”');
+      const general = conditions.find(entry => entry.id === 'other');
+      populateConditions([general], general.id);
+      $('#specialty').disabled = false;
+      if ($('#specialist-save')) $('#specialist-save').disabled = false;
+      renderDirectory();
     }
   }
   function specialtyGuide(entry) {
@@ -450,12 +588,23 @@
     const version = specialistVersion;
     const button = $('#specialist-ai');
     button.disabled = true;
+    if (options.review) {
+      const approved = await reviewInput({
+        title: 'Review your specialty request',
+        summary: searchFallback ? `Help me find the right specialty for: ${searchTerm}` : `Suggest appropriate specialties and booking questions for ${entry.name}.`,
+        actionLabel: 'Ask care assistant', field: '#specialist-search'
+      });
+      if (version !== specialistVersion) return;
+      if (!approved) { button.disabled = false; return; }
+    }
     const responseNode = appendText(holder, 'Preparing a guide…', 'p', 'specialist-guidance');
     try {
-      const response = await options.ai?.('specialists', { text: `Help me prepare to find care for ${entry.name}. Suggest appropriate specialties and questions to ask an office.`, context: { location: $('#specialist-location')?.value.trim() || '' } });
+      const response = await options.ai?.('specialists', { text: searchFallback ?
+        `I searched for "${searchTerm}". Explain what types of care or specialties may be relevant, without assuming a diagnosis or inventing providers.` :
+        `Help me prepare to find care for ${entry.name}. Suggest appropriate specialties and questions to ask an office.` });
       if (version !== specialistVersion) return;
       responseNode.textContent = response?.text || specialtyGuide(entry);
-      if (!response?.text) notify('Showing a local specialty guide. Enable AI tools for a tailored response.');
+      if (!response?.text) notify('Showing a local specialty guide. AI guidance is used automatically when connected.');
     } catch {
       if (version === specialistVersion) responseNode.textContent = `${specialtyGuide(entry)}\n\nAI could not respond. These local resources are still available.`;
     } finally {
@@ -506,10 +655,22 @@
     if ($('#decoder-save')) {
       $('#decoder-save').disabled = true;
       $('#decoder-save').hidden = true;
-      $('#decoder-save').onclick = () => {
+      $('#decoder-save').onclick = async () => {
         if (!lastExplanation) return;
+        const version = decodeVersion;
+        const text = $('#medical-text').value;
         const matches = glossaryMatches($('#medical-text').value).slice(0, 3).map(([name]) => name);
-        options.addTask?.(matches.length ? `Ask my clinician what ${matches.join(', ')} in my notes means for me` : 'Ask my clinician to explain the unfamiliar wording in my medical notes');
+        const question = matches.length ? `Ask my clinician what ${matches.join(', ')} in my notes means for me` : 'Ask my clinician to explain the unfamiliar wording in my medical notes';
+        const button = $('#decoder-save');
+        button.disabled = true;
+        const approved = await reviewInput({
+          title: 'Review your follow-up question', summary: question, actionLabel: 'Save question', field: '#medical-text'
+        });
+        if (version !== decodeVersion) return;
+        if (text !== $('#medical-text').value) { clearExplanation(); return; }
+        button.disabled = false;
+        if (!approved) return;
+        options.addTask?.(question);
         notify('A question about these notes was added to your care plan.');
       };
     }
@@ -519,11 +680,22 @@
       renderDirectory();
     }
     $('#specialist-search')?.addEventListener('input', filterConditions);
-    $('#specialist-location')?.addEventListener('input', renderDirectory);
-    if ($('#specialist-save')) $('#specialist-save').onclick = () => {
+    if ($('#specialist-save')) $('#specialist-save').onclick = async () => {
       const entry = selectedCondition();
-      options.addTask?.(`Ask whether a referral to ${entry.specialties[0]} is appropriate for ${entry.name}`);
-      options.addTask?.(`Confirm the specialist's experience with ${entry.name}, insurance, availability, and accessibility`);
+      const version = specialistVersion;
+      const questions = [
+        `Ask whether a referral to ${entry.specialties[0]} is appropriate for ${searchFallback ? 'my concern' : entry.name}`,
+        `Confirm the specialist's experience with ${searchFallback ? 'my concern' : entry.name}, insurance, availability, and accessibility`
+      ];
+      const button = $('#specialist-save');
+      button.disabled = true;
+      const approved = await reviewInput({
+        title: 'Review your booking questions', summary: questions.join('\n'), actionLabel: 'Save questions', field: '#specialist-search'
+      });
+      if (version !== specialistVersion) return;
+      button.disabled = false;
+      if (!approved) return;
+      questions.forEach(question => options.addTask?.(question));
       notify('Specialist questions added to your care plan.');
     };
     if ($('#specialist-ai')) $('#specialist-ai').onclick = specialistAI;
@@ -531,7 +703,7 @@
 
   window.CareMedical = {
     conditions, glossary, conditionNames: () => conditions.map(entry => entry.name),
-    matchConditions, glossaryMatches, explainLocal, init, decode, renderDirectory,
+    matchConditions, searchConditions, glossaryMatches, explainLocal, init, decode, renderDirectory,
     chooseSpecialty, currentDirectory
   };
 })(window);

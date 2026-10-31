@@ -22,7 +22,16 @@
     const isExpectedInput = options.isExpectedInput || (() => false);
     let enabled = false;
     let wakeListening = false;
+    // Reusing one browser recognizer avoids repeatedly allocating a service
+    // that may re-request microphone access on platforms with session grants.
+    let recognizer = null;
     let recognition = null;
+    let recognitionVersion = 0;
+    let stopping = false;
+    let permissionStatus = null;
+    let permissionChecked = false;
+    let permissionChecking = false;
+    let speechOptions = { voiceURI: '', rate: 1, pitch: 1 };
     let listening = false;
     let starting = false;
     let speaking = false;
@@ -57,7 +66,13 @@
       recognition = null;
       listening = starting = false;
       if (previous) {
-        try { previous.abort(); } catch { /* Session already ended. */ }
+        // Do not restart the same native object until its end event has arrived.
+        stopping = true;
+        try { previous.abort(); }
+        catch {
+          stopping = false;
+          recognitionVersion += 1;
+        }
       }
     }
     function cancelSpeech() {
@@ -73,14 +88,27 @@
       const activation = window.navigator?.userActivation;
       return !activation || activation.hasBeenActive || activation.isActive;
     }
+    function getVoices() {
+      return synthesis && typeof synthesis.getVoices === 'function' ? synthesis.getVoices() : [];
+    }
+    function setSpeechOptions(value = {}) {
+      if (typeof value.voiceURI === 'string') speechOptions.voiceURI = value.voiceURI;
+      if (Number.isFinite(Number(value.rate))) speechOptions.rate = Math.min(1.5, Math.max(0.5, Number(value.rate)));
+      if (Number.isFinite(Number(value.pitch))) speechOptions.pitch = Math.min(2, Math.max(0.5, Number(value.pitch)));
+      return { ...speechOptions };
+    }
     function chooseVoice(utterance) {
-      const voices = typeof synthesis.getVoices === 'function' ? synthesis.getVoices() : [];
-      const voice = voices.find(item => /^en-US$/i.test(item.lang) && item.localService) ||
+      const voices = getVoices();
+      const voice = voices.find(item => item.voiceURI === speechOptions.voiceURI && speechOptions.voiceURI) ||
+        voices.find(item => /^en-US$/i.test(item.lang) && item.localService) ||
         voices.find(item => /^en-US$/i.test(item.lang)) || voices.find(item => /^en\b/i.test(item.lang));
-      if (voice) utterance.voice = voice;
+      if (voice) {
+        utterance.voice = voice;
+        utterance.lang = voice.lang || 'en-US';
+      }
     }
     function scheduleRestart(delay) {
-      if (!active() || suspendedState || speaking || recognition || restartTimer !== null) return;
+      if (!active() || suspendedState || speaking || recognition || stopping || permissionChecking || restartTimer !== null) return;
       const backoff = retryCount ? Math.min(8000, 500 * (2 ** (retryCount - 1))) :
         Math.min(5000, 250 * (2 ** Math.min(silentEnds, 4)));
       const wait = Math.max(delay ?? backoff, resumeAt - Date.now(), 0);
@@ -120,7 +148,8 @@
       onClear();
       const utterance = new Utterance(String(text));
       utterance.lang = 'en-US';
-      utterance.rate = 1;
+      utterance.rate = speechOptions.rate;
+      utterance.pitch = speechOptions.pitch;
       chooseVoice(utterance);
       const version = speechVersion;
       currentUtterance = utterance;
@@ -179,8 +208,33 @@
       onError(message, code);
       state(message);
     }
+    function checkSavedPermission() {
+      if (permissionChecked || !window.navigator?.permissions?.query) return false;
+      permissionChecking = true;
+      starting = true;
+      state('Checking saved microphone permission…');
+      // Querying permission does not prompt or open another microphone stream.
+      // Some browsers do not implement the microphone permission descriptor.
+      Promise.resolve().then(() => window.navigator.permissions.query({ name: 'microphone' }))
+        .then(status => {
+          permissionStatus = status;
+          permissionChecked = true;
+          status.addEventListener?.('change', () => {
+            if (status.state === 'denied' && active()) {
+              failRecognition('Microphone access was blocked. Allow it in browser site settings, then choose Retry microphone.', 'not-allowed', 'permission');
+            }
+          });
+        }, () => { permissionChecked = true; })
+        .then(() => {
+          permissionChecking = false;
+          starting = false;
+          if (active() && !speaking && !suspendedState) startListening();
+          else state();
+        });
+      return true;
+    }
     function startListening() {
-      if (!active() || suspendedState || speaking || recognition || starting || listening) return;
+      if (!active() || suspendedState || speaking || recognition || stopping || permissionChecking || starting || listening) return;
       if (Date.now() < resumeAt) { scheduleRestart(resumeAt - Date.now()); return; }
       clearRestart();
       if (!Recognition) {
@@ -192,13 +246,23 @@
         failRecognition('Open this site using HTTPS or localhost to use microphone voice control.', 'insecure-origin', 'unavailable');
         return;
       }
+      if (checkSavedPermission()) return;
+      if (permissionStatus?.state === 'denied') {
+        failRecognition('Microphone access is blocked. Allow it in browser site settings, then choose Retry microphone.', 'not-allowed', 'permission');
+        return;
+      }
       let session;
-      try { session = new Recognition(); }
+      try {
+        if (!recognizer) recognizer = new Recognition();
+        session = recognizer;
+      }
       catch {
         failRecognition('Microphone voice control could not initialize in this browser.', 'recognition-unsupported', 'unavailable');
         return;
       }
       recognition = session;
+      const version = ++recognitionVersion;
+      const current = () => version === recognitionVersion && session === recognition;
       const finalIndexes = new Set();
       let receivedResult = false;
       let hadError = false;
@@ -209,13 +273,13 @@
       starting = true;
       state();
       session.onstart = () => {
-        if (session !== recognition || !active() || speaking) return;
+        if (!current() || !active() || speaking) return;
         starting = false;
         listening = true;
         state();
       };
       session.onresult = event => {
-        if (session !== recognition || !active() || speaking) return;
+        if (!current() || !active() || speaking) return;
         for (let index = event.resultIndex || 0; index < event.results.length; index += 1) {
           const result = event.results[index];
           if (!result?.isFinal || finalIndexes.has(index)) continue;
@@ -230,30 +294,29 @@
           if (!enabled) {
             // Wake-only mode never forwards discussion or navigation commands.
             if (isWake(text)) {
-              stopRecognition();
               onClear();
               onWake(text);
-              if (active() && !speaking) scheduleRestart(80);
               return;
             }
             onClear();
             continue;
           }
-          // A new session after each final result drops the browser's result
-          // history and makes repeated/stale finals harmless.
-          stopRecognition();
+          // Continuous recognition can accept another final without requesting
+          // a new microphone session. Result indexes deduplicate this session.
           try { onTranscript(text, { confidence: Number.isFinite(confidence) ? confidence : 0 }); }
           finally { onClear(); }
-          if (active() && !speaking) scheduleRestart(80);
-          return;
+          if (!current() || !active() || speaking) return;
         }
       };
       session.onerror = event => {
-        if (session !== recognition || !active()) return;
+        if (!current() || !active()) return;
         hadError = true;
         listening = starting = false;
         const code = event.error || 'unknown';
         if (['not-allowed', 'service-not-allowed'].includes(code)) {
+          // Explicit Retry will query again, after the user changes site settings.
+          permissionChecked = false;
+          permissionStatus = null;
           failRecognition('Microphone access is blocked. Allow it in browser site settings, then choose Retry microphone.', code, 'permission');
         } else if (code === 'audio-capture') {
           failRecognition('No microphone is available. Check the microphone connection and browser permissions, then retry.', code, 'unavailable');
@@ -272,7 +335,15 @@
         }
       };
       session.onend = () => {
-        if (session !== recognition) return;
+        if (version !== recognitionVersion) return;
+        if (session !== recognition) {
+          if (stopping) {
+            stopping = false;
+            state();
+            scheduleRestart(0);
+          }
+          return;
+        }
         recognition = null;
         listening = starting = false;
         if (!receivedResult && !hadError) silentEnds += 1;
@@ -285,6 +356,8 @@
         recognition = null;
         listening = starting = false;
         if (error && ['NotAllowedError', 'SecurityError'].includes(error.name)) {
+          permissionChecked = false;
+          permissionStatus = null;
           failRecognition('Microphone access needs browser permission. Allow it, then choose Retry microphone.', 'not-allowed', 'permission');
         } else {
           retryCount += 1;
@@ -300,6 +373,9 @@
       retryCount = silentEnds = 0;
       clearRestart();
       onClear();
+      // Wake mode can already be capturing on the same native session. Publish
+      // the mode change even when startListening correctly reuses that session.
+      state();
       startListening();
       if (welcome) speak(welcome);
       else if (queuedSpeech && canPlayAudio()) speak(queuedSpeech);
@@ -318,7 +394,16 @@
       if (wakeListening) startListening();
     }
     function setWakeListening(value) {
-      wakeListening = Boolean(value);
+      const next = Boolean(value);
+      if (next === wakeListening) {
+        if (next && !enabled && suspendedState) {
+          suspendedState = '';
+          retryCount = silentEnds = 0;
+          startListening();
+        }
+        return wakeListening;
+      }
+      wakeListening = next;
       if (!enabled) {
         clearRestart();
         stopRecognition();
@@ -351,7 +436,8 @@
       });
     }
     return {
-      enable, disable, speak, interrupt, setWakeListening,
+      enable, disable, speak, interrupt, setWakeListening, setSpeechOptions, getVoices,
+      get speechOptions() { return { ...speechOptions }; },
       get enabled() { return enabled; },
       get wakeListening() { return wakeListening; },
       get supported() { return Boolean(Recognition); },
