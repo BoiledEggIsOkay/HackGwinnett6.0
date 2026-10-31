@@ -8,6 +8,7 @@
     "start": "node server.js",
     "test": "node --test tests/*.test.cjs",
     "test:browser": "node tests/browser-smoke.cjs",
+    "test:browser:assistant": "node tests/browser-assistant.cjs",
     "test:browser:ai": "node tests/browser-ai.cjs"
   }
 }

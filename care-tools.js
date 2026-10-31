@@ -6,6 +6,7 @@
   let visit = {};
   let history = [];
   let chatVersion = 0;
+  let chatBusy = false;
   let planVersion = 0;
   let proposedTasks = [];
 
@@ -165,46 +166,34 @@
     }
   }
 
-  function localReply(text) {
-    if (/\b(?:chest pain|severe trouble breathing|cannot breathe|can't breathe|stroke|suicid(?:e|al)|kill myself|overdose)\b/i.test(text)) {
-      return 'If this is happening now, contact local emergency services right away. New severe chest pain, severe breathing difficulty, signs of stroke, or an overdose need urgent evaluation. If you may harm yourself, contact emergency services or a crisis service now; in the U.S., call or text 988. This assistant cannot assess an emergency.';
-    }
-    if (/\b(?:symptom|track|diary|journal|record)\b/i.test(text)) {
-      return 'Use the symptom record in My care plan to note what happened, when it happened, its severity, and any triggers. Include how it affected your daily activities. Patterns can help your clinician ask better questions, but a symptom record alone cannot identify the cause.';
-    }
-    if (/\b(?:medicine|medication|drug|dose|prescription|side effect|interaction)\b/i.test(text)) {
-      return 'Make a list of every medicine and supplement, with its dose, timing, and purpose. Ask your pharmacist or clinician about side effects, interactions, and missed doses. Do not start, stop, or change a prescription based on this assistant. Choose Medication review in My care plan to prepare questions.';
-    }
-    if (/\b(?:insurance|cost|bill|coverage|afford)\b/i.test(text)) {
-      return 'Ask your insurer whether the clinician, facility, and any planned tests are in network. Ask the office about referral requirements, prior authorization, and an estimated cost. If costs are a barrier, ask about financial assistance, payment plans, or community health centers. Directory listings do not confirm coverage.';
-    }
-    if (/\b(?:accommodation|accessibility|wheelchair|sensory|autism|accessible)\b/i.test(text)) {
-      return 'Before your visit, ask for the accommodations that help you: a quiet waiting area, step-free access, written instructions, an interpreter, a support person, breaks, or a longer appointment. Add those requests to your checklist and confirm them with the office when booking.';
-    }
-    const conditions = window.CareMedical.matchConditions(text);
-    if (conditions.length && !/\b(?:specialist|find|doctor|refer)\b/i.test(text)) {
-      return conditions.map(condition => `${condition.name}: ${condition.summary} Clinicians who may help include ${condition.specialties.join(', ')}.`).join('\n\n') +
-        '\n\nAsk your clinician how this information applies to you. I can also help you find condition resources or prepare questions.';
-    }
-    if (/\b(?:specialist|doctor|find|referral)\b/i.test(text) && !/\b(?:visit|prepare|appointment)\b/i.test(text)) {
-      return conditions.length ?
-        `For ${conditions[0].name}, relevant specialties can include ${conditions[0].specialties.join(', ')}. Find a specialist has condition resources and clinician directories. Ask about experience, referral requirements, insurance, accessibility, and wait times before booking.` :
-        'Find a specialist includes a searchable condition library, specialty suggestions, trusted resources, and clinician directory links. Ask your primary care clinician which specialty fits your concern. Confirm the provider’s experience, availability, insurance, and accessibility directly with the office.';
-    }
-    if (/\b(?:visit|prepare|appointment|question|checklist)\b/i.test(text)) {
-      return 'Start with the concern you most want addressed. Write down when symptoms began, what makes them better or worse, and how they affect daily life. Bring medicines, previous results, and accessibility requests. In My care plan, choose a visit template to create a checklist. Ask: What are the possible causes? What is the next step? When should I follow up?';
-    }
-    const matches = window.CareMedical.glossaryMatches(text);
-    if (matches.length) return matches.map(([term, meaning]) => `${term}: ${meaning}`).join('\n\n') + '\n\nFor a full note, use Medical decoder. Your clinician can explain findings in context.';
-    return 'I can help explain medical terms and conditions, find specialist resources, prepare visit questions, organize a medication review, or track symptoms. Tell me which part you need help with. For a personal diagnosis or treatment decision, contact your healthcare team.';
+  function localReply(text, context) {
+    return window.CareAssistant.respond(text, context).text;
+  }
+
+  function setChatBusy(value) {
+    chatBusy = value;
+    $('#chat-form button').disabled = value;
+    document.querySelectorAll('#assistant .suggestions button').forEach(button => { button.disabled = value; });
+    $('#chat-messages').setAttribute('aria-busy', String(value));
+  }
+
+  function assistantMode() {
+    if (window.CareAI?.available) return window.CareAI.enabled ? 'AI is enabled.' : 'Local guidance · AI is off.';
+    return 'Local guidance · AI is not connected.';
+  }
+
+  function updateAssistantMode() {
+    if ($('#assistant-status')) $('#assistant-status').textContent = assistantMode();
   }
 
   async function chat(text) {
-    if (!text?.trim()) return;
+    text = String(text || '').trim().slice(0, 4000);
+    if (!text || chatBusy) return;
     const version = chatVersion;
     $('#chat-input').value = text;
     if (options.review && !await options.review({ title: 'Send this prompt to your care assistant?', summary: text, actionLabel: 'Send prompt', field: $('#chat-input') })) return;
     if (version !== chatVersion || $('#chat-input').value !== text) return;
+    setChatBusy(true);
     $('#chat-input').value = '';
     const user = document.createElement('div');
     user.className = 'chat-message user';
@@ -213,22 +202,32 @@
     bot.className = 'chat-message bot';
     bot.textContent = 'Preparing your guidance…';
     $('#chat-messages').append(user, bot);
-    const emergency = /\b(?:chest pain|severe trouble breathing|cannot breathe|can't breathe|stroke|suicid(?:e|al)|kill myself|overdose)\b/i.test(text);
-    let reply = localReply(text);
-    let source = 'Care navigation library';
     const priorMessages = history.slice(-6).map(message => ({ ...message, content: message.content.slice(0, 1500) }));
+    const local = window.CareAssistant.respond(text, { messages: priorMessages, conditions: options.getConditions() });
+    const emergency = local.emergency;
+    let reply = local.text;
+    let source;
     history.push({ role: 'user', content: text });
     try {
+      // Status discovery is asynchronous. A first typed question must wait for
+      // a configured service instead of silently falling back during startup.
+      if (!emergency) await window.CareAI?.ready;
+      if (version !== chatVersion) return;
+      updateAssistantMode();
+      source = emergency ? 'Safety guidance · local response' : `Care navigation library · ${assistantMode()}`;
       if (aiReady() && !emergency) {
         const response = await window.CareAI.request('assistant', {
           text,
           context: { conditions: options.getConditions(), messages: priorMessages }
         });
+        if (!response?.text?.trim()) throw new Error('Empty assistant response');
         reply = response.text;
         source = 'AI guidance · review with your care team';
       }
     } catch {
-      source = 'Care navigation library · AI could not connect';
+      source = 'Care navigation library · local guidance (AI could not respond)';
+    } finally {
+      if (version === chatVersion) setChatBusy(false);
     }
     if (version !== chatVersion) return;
     bot.replaceChildren(paragraph(reply));
@@ -236,7 +235,7 @@
     label.className = 'tool-source';
     label.textContent = source;
     bot.append(label);
-    if (/\b(?:prepare|visit|appointment|medication|accessibility|specialist)\b/i.test(text) && !emergency) {
+    if (!emergency && !['greeting', 'profile', 'clarification'].includes(local.topic)) {
       const action = document.createElement('button');
       action.type = 'button';
       action.className = 'secondary chat-action';
@@ -322,6 +321,7 @@
     $('#plan-export').onclick = exportPlan;
     $('#chat-clear').onclick = () => {
       chatVersion++;
+      setChatBusy(false);
       history = [];
       $('#chat-messages').replaceChildren();
       const greeting = document.createElement('div');
@@ -330,6 +330,8 @@
       $('#chat-messages').append(greeting);
       options.toast('Conversation cleared.');
     };
+    window.CareAI?.ready?.then(updateAssistantMode, updateAssistantMode);
+    window.addEventListener('care-ai-change', updateAssistantMode);
     renderSymptoms();
     renderProgress();
   }

@@ -15,6 +15,7 @@ const assets = new Map([
   ['/voice-assistant.js', ['voice-assistant.js', 'text/javascript']],
   ['/voice-intents.js', ['voice-intents.js', 'text/javascript']],
   ['/medical-tools.js', ['medical-tools.js', 'text/javascript']],
+  ['/care-assistant.js', ['care-assistant.js', 'text/javascript']],
   ['/care-tools.js', ['care-tools.js', 'text/javascript']],
   ['/ai-client.js', ['ai-client.js', 'text/javascript']],
   ['/settings.js', ['settings.js', 'text/javascript']],

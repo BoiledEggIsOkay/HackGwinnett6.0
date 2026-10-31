@@ -34,7 +34,7 @@ Keep the whole project folder together, including all JavaScript modules.
 Opening an HTML-only copy or a preview that does not serve the other files
 will lose the formatting and scripts. If you see an unformatted white page,
 confirm you are visiting the localhost URL, restart the server, and refresh
-with **Command + Shift + R** on a Mac. In Chrome's Network panel, `style.css?v=5`
+with **Command + Shift + R** on a Mac. In Chrome's Network panel, `style.css?v=6`
 should return `200` with a `text/css` content type.
 
 The stylesheet uses local system fonts and needs no Google Fonts request.
@@ -154,6 +154,11 @@ Implementation references:
   copy to bring to a visit. AI suggestions are reviewed before being added.
 - **Care assistant:** explains terms and conditions, helps prepare visits and
   medication reviews, and discusses insurance or accessibility questions.
+  Type your own question; presets are optional. Local guidance understands
+  everyday symptom wording and follow-up questions about the current topic.
+  It asks for clarification when the local library cannot answer, and the chat
+  shows whether a reply comes from AI or the local library. A configured AI
+  connection is checked before sending the first question.
   With voice on, entering the page prompts for your question and asks you to
   verify it before sending. Save a question to your checklist or clear the
   conversation at any time. It cannot diagnose, prescribe, or assess emergencies.
@@ -191,6 +196,7 @@ Chromium browser:
 ```sh
 npm run test:browser
 npm run test:browser:ai
+npm run test:browser:assistant
 ```
 
 If Playwright is installed outside this project, set `CARE_COMPASS_PLAYWRIGHT`
