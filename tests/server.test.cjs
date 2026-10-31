@@ -10,7 +10,11 @@ test('serves the stylesheet and scripts with browser-readable MIME types', async
   for (const [asset, type, expected] of [
     ['style.css', 'text/css', '.sidebar'],
     ['app.js', 'text/javascript', 'navigate'],
-    ['voice-assistant.js', 'text/javascript', 'CareVoice']
+    ['voice-assistant.js', 'text/javascript', 'CareVoice'],
+    ['voice-intents.js', 'text/javascript', 'CareIntents'],
+    ['medical-tools.js', 'text/javascript', 'CareMedical'],
+    ['care-tools.js', 'text/javascript', 'CareTools'],
+    ['ai-client.js', 'text/javascript', 'CareAI']
   ]) {
     const response = await fetch(`${server.baseURL}/${asset}?v=browser-test`);
     assert.equal(response.status, 200, asset);
@@ -27,7 +31,9 @@ test('both entry URLs reference the local stylesheet and voice engine', async ()
     assert.ok(response.headers.get('content-type').startsWith('text/html'));
     const html = await response.text();
     assert.match(html, /href="(?:\.\/)?style\.css(?:\?[^"]*)?"/);
-    assert.match(html, /src="(?:\.\/)?voice-assistant\.js(?:\?[^"]*)?"/);
+    for (const file of ['voice-assistant', 'voice-intents', 'medical-tools', 'care-tools', 'ai-client', 'app']) {
+      assert.match(html, new RegExp(`src="(?:\\./)?${file}\\.js(?:\\?[^"]*)?"`));
+    }
     assert.doesNotMatch(html, /Jamie/);
   }
 });

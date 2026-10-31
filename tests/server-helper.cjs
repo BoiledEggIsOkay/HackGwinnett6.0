@@ -4,7 +4,7 @@ const { spawn } = require('node:child_process');
 const { once } = require('node:events');
 const { setTimeout: delay } = require('node:timers/promises');
 
-async function startServer() {
+async function startServer(environment = {}) {
   const portProbe = net.createServer();
   portProbe.listen(0, '127.0.0.1');
   await once(portProbe, 'listening');
@@ -12,7 +12,7 @@ async function startServer() {
   await new Promise(resolve => portProbe.close(resolve));
   const child = spawn(process.execPath, ['server.js'], {
     cwd: path.join(__dirname, '..'),
-    env: { ...process.env, PORT: String(port) },
+    env: { ...process.env, OPENAI_API_KEY: '', OPENAI_BASE_URL: '', ...environment, PORT: String(port) },
     stdio: ['ignore', 'pipe', 'pipe']
   });
   let output = '';

@@ -49,7 +49,9 @@ let pendingInput = null;
 let voice;
 let toastTimer;
 const dialog = $('#settings-dialog');
-const welcome = 'Welcome, Guest User, to Care Compass. Voice assistance is ready to guide you around the site and collect spoken answers. The Voice commands button lists the available actions.';
+let careToolsReady = false;
+let voiceEpoch = 0;
+let transcriptTimer;
 function toast(text) {
   $('#toast').textContent = text;
   $('#toast').style.display = 'block';
@@ -71,6 +73,7 @@ function reducedMotion() {
 }
 function navigate(page, { announce = true } = {}) {
   if (!names[page]) return;
+  voiceEpoch++;
   cancelInput();
   if (dialog.open) dialog.close();
   currentPage = page;
@@ -100,6 +103,7 @@ dialog.addEventListener('close', () => {
   if (!dialog.open && pendingInput?.inDialog) cancelInput();
 });
 function modal(title, html) {
+  voiceEpoch++;
   cancelInput();
   $('#dialog-title').textContent = title;
   $('#dialog-content').innerHTML = html;
@@ -117,23 +121,29 @@ applyPreferences();
 function accessibility() {
   modal('Care that works for you.', `
     <label class="setting-row">Voice control and read-aloud<input type="checkbox" id="tts" ${voice?.enabled ? 'checked' : ''}></label>
+    <label class="setting-row">Wake phrase while voice is off<input type="checkbox" id="wake-setting" ${voice?.wakeListening ? 'checked' : ''}></label>
     <label class="setting-row">Larger text<input type="checkbox" id="large" ${preferences.large ? 'checked' : ''}></label>
     <label class="setting-row">Higher contrast<input type="checkbox" id="contrast" ${preferences.contrast ? 'checked' : ''}></label>
     <p class="fine-print">Use Tab to navigate and Enter to select. You can also say “larger text on,” “higher contrast on,” or “save preferences.”</p>
     <button class="primary" id="save-access">Save preferences</button>`);
   $('#save-access').onclick = () => {
+    const wantsVoice = $('#tts').checked;
+    const wantsWake = $('#wake-setting').checked;
     preferences.large = $('#large').checked;
     preferences.contrast = $('#contrast').checked;
     applyPreferences();
-    setVoiceEnabled($('#tts').checked);
+    setWakeListening(wantsWake);
+    setVoiceEnabled(wantsVoice);
     dialog.close();
     toast('Accessibility preferences updated');
   };
 }
 $('#accessibility').onclick = accessibility;
-const conditionOptions = ['Ehlers-Danlos syndrome', 'POTS', 'ME/CFS', 'Fibromyalgia', 'Long COVID', 'Other / exploring a diagnosis'];
-let conditions = load('conditions', conditionOptions.slice(0, 2), value =>
-  Array.isArray(value) && value.every(condition => conditionOptions.includes(condition)));
+const conditionOptions = window.CareMedical.conditionNames();
+const savedConditions = load('conditions', conditionOptions.slice(0, 2), value =>
+  Array.isArray(value) && value.every(condition => typeof condition === 'string'));
+let conditions = [...new Set(savedConditions.flatMap(name => conditionOptions.includes(name) ?
+  [name] : window.CareMedical.matchConditions(name).slice(0, 1).map(condition => condition.name)))];
 function renderConditions() {
   const holder = $('#condition-chips');
   holder.querySelectorAll('span').forEach(element => element.remove());
@@ -145,9 +155,14 @@ function renderConditions() {
 }
 function profile() {
   modal('What are you navigating?', `
-    <p class="fine-print">Choose the conditions you’d like reflected in your prototype care space. You can update this any time.</p>
+    <p class="fine-print">Choose the conditions you’d like reflected in your care space. You can update this any time.</p>
+    <label for="profile-search">Search conditions</label><input id="profile-search" type="search" placeholder="Search your condition">
     ${conditionOptions.map((condition, index) => `<label class="condition-option"><input type="checkbox" value="${index}" ${conditions.includes(condition) ? 'checked' : ''}>${condition}</label>`).join('')}
     <button class="primary" id="save-profile">Save my profile</button>`);
+  $('#profile-search').oninput = event => {
+    const query = event.target.value.toLowerCase().trim();
+    dialog.querySelectorAll('.condition-option').forEach(label => { label.hidden = !label.textContent.toLowerCase().includes(query); });
+  };
   $('#save-profile').onclick = () => {
     conditions = [...dialog.querySelectorAll('.condition-option input:checked')].map(input => conditionOptions[input.value]);
     save('conditions', conditions);
@@ -160,7 +175,7 @@ function profile() {
 renderConditions();
 ['#profile', '#edit-profile', '#add-condition'].forEach(selector => { $(selector).onclick = profile; });
 function about() {
-  modal('Every condition. Every person.', '<p class="promise-copy">Care Compass helps people with under-recognized conditions find clarity and prepare for care. We believe your experiences deserve to be heard.</p><p class="fine-print">Your profile and checklist stay in your browser on this device. This prototype has no medical AI service or document storage server.</p>');
+  modal('Every condition. Every person.', '<p class="promise-copy">Care Compass helps people with under-recognized conditions find clarity and prepare for care. We believe your experiences deserve to be heard.</p><p class="fine-print">Your profile and checklist stay in your browser on this device. AI tools are optional. Enabling them sends submitted text and relevant profile details to the AI service. Medical notes and conversations are not saved by this app.</p>');
 }
 $('#about').onclick = about;
 $('#notifications').onclick = () => toast('You’re all caught up. Take your next step at your own pace.');
@@ -172,82 +187,9 @@ if (dateLabel) {
   dateLabel.append(dateText);
 }
 
-const terms = {
-  tachycardia: 'A faster-than-usual heart rate.',
-  'orthostatic intolerance': 'Symptoms such as dizziness when standing upright.',
-  hemoglobin: 'A protein in red blood cells that carries oxygen.',
-  anemia: 'A lower-than-expected amount of healthy red blood cells or hemoglobin.',
-  hypertension: 'High blood pressure.',
-  hypotension: 'Low blood pressure.',
-  benign: 'Usually means a finding is not cancerous. Its meaning depends on context.',
-  edema: 'Swelling caused by fluid collecting in the tissues.',
-  dysautonomia: 'Conditions that affect automatic body functions, such as heart rate and blood pressure.',
-  chronic: 'Lasting a long time or repeatedly coming back.',
-  potassium: 'A mineral that helps your nerves, muscles, and heart work.',
-  glucose: 'A type of sugar your body uses for energy.',
-  creatinine: 'A waste product measured to help assess kidney function.',
-  fatigue: 'Tiredness or lack of energy that can affect everyday activities.',
-  pots: 'A condition involving an excessive rise in heart rate when standing, along with symptoms.'
-};
-function glossaryMatches(text) {
-  return Object.entries(terms).filter(([term]) => new RegExp(`\\b${term}\\b`, 'i').test(text));
-}
-function decode() {
-  const text = $('#medical-text').value.trim();
-  if (!text) {
-    toast('Paste or dictate your medical notes to get started');
-    $('#medical-text').focus();
-    return false;
-  }
-  const found = glossaryMatches(text);
-  const result = $('#decode-result');
-  result.replaceChildren();
-  const heading = document.createElement('h3');
-  heading.textContent = 'Your notes, in everyday language';
-  result.append(heading);
-  if (!found.length) {
-    const paragraph = document.createElement('p');
-    paragraph.textContent = 'No terms in our demo glossary were found. Try “tachycardia,” “hemoglobin,” or “orthostatic intolerance.” Ask your clinician about any unfamiliar terms.';
-    result.append(paragraph);
-  }
-  found.forEach(([term, meaning]) => {
-    const paragraph = document.createElement('p');
-    const label = document.createElement('strong');
-    label.textContent = `${term.charAt(0).toUpperCase() + term.slice(1)}: `;
-    paragraph.append(label, meaning);
-    result.append(paragraph);
-  });
-  const paragraph = document.createElement('p');
-  paragraph.textContent = 'Questions to bring to your visit: What does this mean for me? Do I need any follow-up testing? What changes should I watch for? Numbers alone cannot be assessed reliably without your lab’s reference ranges and clinical context.';
-  result.append(paragraph);
-  speak(result.innerText);
-  return true;
-}
-$('#decode').onclick = decode;
-$('#document').onchange = async event => {
-  const file = event.target.files[0];
-  if (!file) return;
-  try {
-    if (file.size > 1024 * 1024) throw new Error('Choose a text file smaller than 1 MB.');
-    $('#medical-text').value = await file.text();
-    toast('Notes added. Ready to explain.');
-    speak('Notes added. Say explain notes when you are ready.');
-  } catch (error) {
-    toast(error.message || 'Unable to read this file. You can paste or dictate your notes instead.');
-  }
-};
-const directories = [
-  ['The Ehlers-Danlos Society', 'A public directory of professionals with an interest in EDS and HSD.', 'https://www.ehlers-danlos.com/healthcare-professionals-directory/'],
-  ['Dysautonomia International', 'Physician resources for POTS and other forms of dysautonomia.', 'https://www.dysautonomiainternational.org/page.php?ID=14'],
-  ['Solve M.E.', 'Resources and support for people navigating ME/CFS.', 'https://solvecfs.org/'],
-  ['NORD Rare Disease Resources', 'Information and support for people with rare conditions.', 'https://rarediseases.org/']
-];
-function renderDirectory() {
-  const entry = directories[$('#specialty').selectedIndex];
-  $('#specialist-results').innerHTML = `<a href="${entry[2]}" target="_blank" rel="noopener noreferrer"><strong>${entry[0]} ↗</strong><span>${entry[1]}</span></a><div class="plan-note"><p>Before booking, ask: Do you have experience with my condition? Is the office physically accessible? Can I request a longer appointment or a virtual visit?</p></div>`;
-}
-$('#specialty').onchange = renderDirectory;
-renderDirectory();
+function glossaryMatches(text) { return window.CareMedical.glossaryMatches(text); }
+function decode() { return window.CareMedical.decode(); }
+function renderDirectory() { return window.CareMedical.renderDirectory(); }
 const defaultTasks = [
   { text: 'Write down my symptoms and when they happen', done: false },
   { text: 'Bring my current medications and supplements', done: false },
@@ -271,7 +213,7 @@ function renderTasks() {
     const input = document.createElement('input');
     input.type = 'checkbox';
     input.checked = task.done;
-    input.onchange = () => { task.done = input.checked; save('tasks', tasks); };
+    input.onchange = () => { task.done = input.checked; save('tasks', tasks); if (careToolsReady) window.CareTools.renderProgress(); };
     const text = document.createElement('span');
     text.textContent = `${index + 1}. ${task.text}`;
     label.append(input, text);
@@ -283,8 +225,11 @@ function renderTasks() {
     row.append(label, remove);
     $('#checklist').append(row);
   });
+  if (careToolsReady) window.CareTools.renderProgress();
 }
 function addTask(text) {
+  text = String(text).trim().slice(0, 500);
+  if (!text) return;
   tasks.push({ text, done: false });
   save('tasks', tasks);
   renderTasks();
@@ -305,30 +250,13 @@ function readChecklist() {
   }
   respond(tasks.map((task, index) => `Item ${index + 1}. ${task.text}. ${task.done ? 'Completed' : 'Still to do'}.`).join(' '));
 }
-function chat(text) {
-  const user = document.createElement('div');
-  user.className = 'chat-message user';
-  user.textContent = text;
-  $('#chat-messages').append(user);
-  let reply;
-  if (/\bpots\b/i.test(text)) {
-    reply = 'POTS stands for postural orthostatic tachycardia syndrome. It can cause a large increase in heart rate when standing, with symptoms such as lightheadedness and fatigue. Ask your clinician what management options are appropriate for you.';
-  } else if (/specialist|doctor|find/i.test(text) && !/visit|prepare|appointment/i.test(text)) {
-    reply = 'Open “Find a specialist” for trusted public directories. Before booking, ask about their experience with your condition, insurance, virtual visits, and accessibility accommodations.';
-  } else if (/visit|prepare|appointment/i.test(text)) {
-    reply = 'For your next visit, write down your main symptoms, how they affect your day, and your top three questions. Bring your medication list and explain any accessibility needs. Your care plan has a checklist you can customize.';
-  } else {
-    const match = glossaryMatches(text)[0];
-    reply = match ? `${match[1]} Your clinician can explain what this means in your situation.` :
-      'I can help with common medical terms, specialist resources, and visit preparation. Try asking “What is POTS?” or “Help me prepare for a visit.” For personal treatment advice, speak with your healthcare team.';
-  }
-  const bot = document.createElement('div');
-  bot.className = 'chat-message bot';
-  bot.textContent = reply;
-  $('#chat-messages').append(bot);
-  bot.scrollIntoView({ behavior: reducedMotion() ? 'auto' : 'smooth', block: 'nearest' });
-  speak(reply);
-}
+window.CareMedical.init({
+  toast, speak: text => { if (['decoder', 'specialists'].includes(currentPage)) speak(text); }, addTask,
+  ai: (tool, payload) => window.CareAI?.enabled && window.CareAI?.available ? window.CareAI.request(tool, payload) : Promise.resolve(null)
+});
+window.CareTools.init({ load, save, toast, speak: text => { if (currentPage === 'assistant') speak(text); }, addTask, getTasks: () => tasks, getConditions: () => conditions });
+careToolsReady = true;
+function chat(text) { return window.CareTools.chat(text); }
 $('#chat-form').onsubmit = event => {
   event.preventDefault();
   const text = $('#chat-input').value.trim();
@@ -336,12 +264,12 @@ $('#chat-form').onsubmit = event => {
 };
 document.querySelectorAll('.suggestions button').forEach(button => { button.onclick = () => chat(button.textContent); });
 
-const voiceHelpText = 'Voice assistance can navigate all five sections, explain dictated medical notes, choose specialist resources, and manage your visit checklist. It can answer prepared care questions, edit your profile conditions, and change accessibility settings. You can interrupt a response, cancel an input, or switch voice assistance off. The command examples are shown in this dialog.';
+const voiceHelpText = 'Voice assistance understands several ways to ask for a section, explain notes, find specialist resources, or manage your checklist. Listening pauses during spoken replies. Use the Interrupt button to stop a reply. With wake listening enabled, say voice assistant on to enable assistance. While off, all other commands are ignored.';
 function voiceHelp() {
   modal('What would you like to do?', `
-    <p>Speak while the assistant is listening. You can interrupt it with a command, or use the “Interrupt” button.</p>
+    <p>Start voice assistance when you want help, then speak while it is listening. Use the Interrupt button to stop a spoken reply and resume listening.</p>
     <ul class="voice-command-list">
-      <li>“Go to overview / medical decoder / find a specialist / my care plan / care assistant”</li>
+      <li>“Take me home,” “help me understand my lab results,” or “I need a doctor for diabetes”</li><li>“Go to overview / medical decoder / find a specialist / my care plan / care assistant”</li>
       <li>“Decode my notes” → dictate the notes when asked</li>
       <li>“Find a specialist for POTS” or choose a condition when asked</li>
       <li>“Add a task” → say your question or reminder</li>
@@ -350,9 +278,9 @@ function voiceHelp() {
       <li>“Edit profile” → choose conditions, then “save profile”</li>
       <li>“Accessibility settings,” “larger text on,” “higher contrast off”</li>
       <li>“Read this page,” “notifications,” “our promise,” “close dialog”</li>
-      <li>“Stop speaking,” “cancel,” “turn off voice assistant”</li>
+      <li>“Prepare my checklist,” “download my care plan,” or “track my symptoms”</li><li>“Cancel,” “turn off voice assistant,” or “voice assistant on” (with wake listening enabled)</li>
     </ul>
-    <p class="fine-print">Allow microphone access when your browser asks. Your browser’s speech service may process audio. If your speakers make interruption difficult, try headphones or the Interrupt button. Uploading a file uses the file chooser; you can dictate notes instead.</p>`);
+    <p class="fine-print">Allow microphone access when your browser asks. Your browser’s speech service may process audio. The microphone pauses during spoken replies to avoid hearing its own voice. Quiet surroundings and headphones can improve recognition. Unrelated speech and low-confidence recognition are ignored. Uploading a file uses the file chooser; you can dictate notes instead.</p>`);
   speak(voiceHelpText);
 }
 $('#voice-help').onclick = voiceHelp;
@@ -360,15 +288,7 @@ function normalized(text) {
   return text.toLowerCase().replace(/[.,!?;:]/g, '').replace(/\s+/g, ' ').trim();
 }
 function matchedConditions(text) {
-  const value = normalized(text);
-  return [
-    /\behlers|\beds\b|\bhypermobile|\bhsd\b|\bdanlos/.test(value),
-    /\bp\s*o\s*t\s*s\b|\bpot's\b|\bdysautonomia\b/.test(value),
-    /\bm\s*e\s*(?:\/|\s)?\s*c\s*f\s*s\b|\bchronic fatigue syndrome\b/.test(value),
-    /\bfibromyalgia\b/.test(value),
-    /\blong covid\b/.test(value),
-    /\bother\b|\bexploring\b|\bundiagnosed\b/.test(value)
-  ].flatMap((matches, index) => matches ? [index] : []);
+  return window.CareMedical.matchConditions(text).map(condition => conditionOptions.indexOf(condition.name)).filter(index => index >= 0);
 }
 function isExpectedVoiceInput(text) {
   // A spoken choice can also appear in the assistant's prompt. Allow exact
@@ -376,11 +296,7 @@ function isExpectedVoiceInput(text) {
   // the full prompt or arbitrary text containing a condition name.
   if (['specialty', 'profile'].includes(pendingInput?.kind)) {
     const answer = normalized(text).replace(/^(?:select|add|remove|deselect|uncheck|no)\s+/, '');
-    const choices = [
-      'ehlers-danlos syndrome', 'ehlers danlos syndrome', 'ehlers danlos', 'eds', 'hsd',
-      'pots', 'dysautonomia', 'pots / dysautonomia', 'me/cfs', 'me cfs', 'm e c f s',
-      'chronic fatigue syndrome', 'fibromyalgia', 'long covid', 'other', 'other conditions'
-    ];
+    const choices = window.CareMedical.conditions.flatMap(condition => [condition.name, ...condition.aliases]).map(normalized);
     return answer.split(/\s+and\s+/).every(choice => choices.includes(choice));
   }
   if (pendingInput?.kind === 'task-choice') {
@@ -390,19 +306,16 @@ function isExpectedVoiceInput(text) {
   return false;
 }
 function chooseSpecialty(text) {
-  const matches = matchedConditions(text);
-  if (!matches.length) return false;
-  const choice = matches[0] < 3 ? matches[0] : 3;
-  $('#specialty').selectedIndex = choice;
-  renderDirectory();
+  if (!window.CareMedical.chooseSpecialty(text)) return false;
   cancelInput();
-  respond(`For ${$('#specialty').value}, try ${directories[choice][0]}. ${directories[choice][1]} Say open directory to visit it.`);
+  const entry = window.CareMedical.currentDirectory();
+  respond(`For ${$('#specialty').selectedOptions[0].textContent}, try ${entry.name}. ${entry.description} Say open directory to visit it.`);
   return true;
 }
 function guidedPage(page) {
   navigate(page, { announce: false });
   if (page === 'decoder') ask('notes', 'Medical decoder. What medical notes would you like explained? Say the notes, and I will explain the terms I recognize.');
-  else if (page === 'specialists') ask('specialty', 'Find a specialist. What condition are you navigating? Say Ehlers-Danlos syndrome, POTS, ME CFS, or other conditions.');
+  else if (page === 'specialists') ask('specialty', 'Find a specialist. What condition are you navigating? Say the name of your condition, such as POTS, migraine, diabetes, or asthma.');
   else if (page === 'assistant') ask('chat', 'Care assistant. What question would you like to ask?');
   else if (page === 'plan') respond('My care plan. Say add a task to dictate a reminder, read my checklist, or complete an item by number.',
     'My care plan. You can add a reminder, hear your checklist, or mark items complete by number.');
@@ -441,7 +354,7 @@ function handleVoiceCommand(transcript) {
   const command = normalized(text).replace(/^(?:(?:please|can you|could you)\s+)+/, '').replace(/\s+please$/, '');
   if (!command) return;
   $('#voice-transcript').textContent = `You said: ${text}`;
-  voice?.interrupt();
+  if (window.CareIntents.isWake(command)) { setVoiceEnabled(true); return; }
   if (/^(?:(?:please|can you|could you)\s+)*(?:turn|switch)\s+(?:off\s+(?:the\s+)?(?:voice\s+)?(?:assistant|assistance|control)|(?:the\s+)?(?:voice\s+)?(?:assistant|assistance|control)\s+off)$/.test(command) ||
       /^(?:(?:please|can you|could you)\s+)*(?:disable|stop|pause)\s+(?:(?:the|my)\s+)?(?:voice(?:\s+(?:assistant|assistance|control))?|listening|microphone)$/.test(command)) {
     cancelInput();
@@ -450,6 +363,7 @@ function handleVoiceCommand(transcript) {
     return;
   }
   if (/^(?:please\s+)?(?:stop(?: speaking| talking| reading)?|be quiet|silence|interrupt)$/.test(command)) {
+    voice?.interrupt();
     $('#voice-hint').textContent = 'Speech stopped. Listening for your next command.';
     return;
   }
@@ -526,7 +440,7 @@ function handleVoiceCommand(transcript) {
     return;
   }
   if (/^(?:open|visit)(?: the)? (?:directory|specialist directory|website)$/.test(command)) {
-    if (currentPage === 'specialists') window.location.assign(directories[$('#specialty').selectedIndex][2]);
+    if (currentPage === 'specialists') window.location.assign(window.CareMedical.currentDirectory().url);
     else guidedPage('specialists');
     return;
   }
@@ -534,7 +448,7 @@ function handleVoiceCommand(transcript) {
   if (specialistMatch) {
     navigate('specialists', { announce: false });
     if (!specialistMatch[1] || !chooseSpecialty(specialistMatch[1])) {
-      ask('specialty', 'What condition are you navigating? Say Ehlers-Danlos syndrome, POTS, ME CFS, or other conditions.');
+      ask('specialty', 'What condition are you navigating? Say the name of your condition, such as POTS, migraine, diabetes, or asthma.');
     }
     return;
   }
@@ -587,6 +501,21 @@ function handleVoiceCommand(transcript) {
     guidedPage('assistant');
     return;
   }
+  if (/^(?:prepare|build|generate)(?: my| a)? (?:checklist|care plan)$/.test(command)) {
+    navigate('plan', { announce: false });
+    window.CareTools.buildPlan();
+    return;
+  }
+  if (/^(?:download|export)(?: my| the)? care plan$/.test(command)) {
+    window.CareTools.exportPlan();
+    return;
+  }
+  if (/^(?:track|record|log)(?: my| a)? symptoms?$/.test(command)) {
+    navigate('plan', { announce: false });
+    $('#symptom-name').focus();
+    respond('Use the symptom record to add a symptom, date, severity, and any triggers.');
+    return;
+  }
   if (pendingInput) {
     const pending = pendingInput;
     if (pending.kind === 'notes') {
@@ -594,7 +523,7 @@ function handleVoiceCommand(transcript) {
       cancelInput();
       decode();
     } else if (pending.kind === 'specialty') {
-      if (!chooseSpecialty(text)) respond('I did not recognize that condition. Say Ehlers-Danlos syndrome, POTS, ME CFS, or other conditions, or say cancel.');
+      if (!chooseSpecialty(text)) respond('Try another condition name or use the condition search. Say cancel to leave this input.');
     } else if (pending.kind === 'task') {
       addTask(text);
       cancelInput();
@@ -604,18 +533,18 @@ function handleVoiceCommand(transcript) {
     } else if (pending.kind === 'profile') {
       const matches = matchedConditions(text);
       if (!matches.length) {
-        respond('Choose Ehlers-Danlos syndrome, POTS, ME CFS, fibromyalgia, Long COVID, or other conditions. Say save profile when ready.');
+        respond('Say a condition from the condition library, or use the profile search. Say save profile when ready.');
       } else {
         const selected = !/^(?:remove|deselect|uncheck|no)\b/.test(command);
         matches.forEach(index => { $(`.condition-option input[value="${index}"]`).checked = selected; });
         respond(`${selected ? 'Selected' : 'Deselected'} ${matches.map(index => conditionOptions[index]).join(' and ')}. Say another condition, or save profile.`);
       }
-    } else if (pending.kind === 'chat') { chat(text); }
+    } else if (pending.kind === 'chat') { cancelInput(); chat(text); }
     return;
   }
-  if (currentPage === 'assistant' || /^(?:what|why|how|help me prepare|tell me|explain)\b/.test(command)) {
+  if (window.CareIntents.isRelevant(text, { page: currentPage })) {
     if (currentPage !== 'assistant') navigate('assistant', { announce: false });
-    pendingInput = { kind: 'chat' };
+    cancelInput();
     chat(text);
     return;
   }
@@ -623,67 +552,96 @@ function handleVoiceCommand(transcript) {
     'I did not recognize that command. You can request a list of voice controls or ask to navigate to a section.');
 }
 
+function clearTranscript() {
+  clearTimeout(transcriptTimer);
+  $('#voice-transcript').textContent = '';
+}
+async function receiveVoiceTranscript(text, metadata = {}) {
+  if (!voice?.enabled) return;
+  const context = { page: currentPage, pending: pendingInput };
+  if (!window.CareIntents.isRelevant(text, context)) { clearTranscript(); return; }
+  if (metadata.confidence > 0 && metadata.confidence < 0.55) { clearTranscript(); return; }
+  const epoch = ++voiceEpoch;
+  const local = window.CareIntents.parse(text, context);
+  let command = local?.command || text;
+  try {
+    const wantsAction = !local || /\b(?:open|take me|bring me|go to|navigate|page|tab|section|add|save|remove|delete|check off|turn|switch|read)\b/i.test(text);
+    if (!pendingInput && (!local || local.confidence < 0.9) && wantsAction && window.CareAI?.enabled) {
+      $('#voice-hint').textContent = 'Understanding your request…';
+      const result = await window.CareAI.request('voice', { text, context: { page: currentPage } });
+      if (epoch !== voiceEpoch || !voice.enabled) return;
+      if (!result.relevant || result.confidence < 0.8) { clearTranscript(); return; }
+      const parsed = window.CareIntents.parse(result.command, context);
+      if (parsed && parsed.confidence >= 0.9) command = parsed.command;
+    }
+  } catch {
+    // Known controls and care guidance remain available if AI cannot connect.
+  }
+  if (epoch !== voiceEpoch || !voice.enabled) return;
+  try { handleVoiceCommand(command); }
+  finally {
+    clearTimeout(transcriptTimer);
+    transcriptTimer = setTimeout(clearTranscript, 1200);
+  }
+}
 const stateLabels = {
-  listening: 'Listening for your command', speaking: 'Speaking — you can interrupt',
+  listening: 'Listening for your command', speaking: 'Speaking · microphone paused',
   starting: 'Starting microphone…', paused: 'Microphone paused',
-  off: 'Voice assistance off', unavailable: 'Voice input unavailable',
-  permission: 'Microphone permission needed'
+  standby: 'Voice assistance off · wake phrase only', off: 'Voice assistance off',
+  unavailable: 'Voice input unavailable', permission: 'Microphone permission needed'
 };
 function updateVoiceState(state, detail) {
   $('#voice').dataset.state = state;
-  $('#voice').setAttribute('aria-pressed', String(voice?.enabled ?? state !== 'off'));
+  $('#voice').setAttribute('aria-pressed', String(voice?.enabled || false));
   $('#voice').setAttribute('aria-label', voice?.enabled ? 'Turn off voice assistance' : 'Turn on voice assistance');
-  $('#voice-status').textContent = state === 'speaking' && !voice?.listening ?
-    'Speaking — use Interrupt to stop' : stateLabels[state] || 'Voice assistance';
+  $('#voice-status').textContent = stateLabels[state] || 'Voice assistance';
   $('#voice-interrupt').disabled = !voice?.enabled;
   if (detail) $('#voice-hint').textContent = detail;
-  else if (state === 'listening' && !pendingInput) $('#voice-hint').textContent = 'Say a section name or “help with voice commands.”';
-  else if (state === 'off') $('#voice-hint').textContent = 'Use Voice assistance to turn on listening and read-aloud.';
+  else if (state === 'listening' && !pendingInput) $('#voice-hint').textContent = 'Say what you need, such as “help me understand my notes” or “find a doctor for migraine.”';
+  else if (state === 'off') $('#voice-hint').textContent = 'Choose Voice assistance to start. Your microphone is off.';
+  else if (state === 'standby') $('#voice-hint').textContent = 'Only “voice assistant on” can activate assistance. Other speech is ignored.';
   else if (state === 'permission') $('#voice-hint').textContent = 'Allow microphone access in your browser, then choose Retry microphone.';
-  $('#voice-retry').hidden = !(['permission', 'paused'].includes(state) ||
-    (state === 'unavailable' && voice?.supported));
-  if (dialog.open && $('#tts')) $('#tts').checked = voice?.enabled || false;
+  $('#voice-retry').hidden = !(['permission', 'paused'].includes(state) || (state === 'unavailable' && voice?.supported));
+}
+function setWakeListening(enabled) {
+  save('voice-wake-enabled', enabled);
+  $('#voice-wake').checked = enabled;
+  if (dialog.open && $('#wake-setting')) $('#wake-setting').checked = enabled;
+  voice.setWakeListening(enabled);
 }
 function setVoiceEnabled(enabled) {
+  voiceEpoch++;
+  clearTranscript();
   save('voice-enabled', enabled);
   if (enabled) voice.enable();
-  else voice.disable();
+  else { cancelInput(); voice.disable(); }
+  if (dialog.open && $('#tts')) $('#tts').checked = enabled;
 }
 voice = window.CareVoice.create({
-  onTranscript: handleVoiceCommand,
+  onTranscript: receiveVoiceTranscript,
+  onWake() { setVoiceEnabled(true); toast('Voice assistance enabled. Listening for your command.'); },
+  onClear: clearTranscript,
   isExpectedInput: isExpectedVoiceInput,
   onState: updateVoiceState,
   onError(message) { $('#voice-hint').textContent = message; toast(message); }
 });
 $('#voice').onclick = () => {
   setVoiceEnabled(!voice.enabled);
-  if (voice.enabled) respond('Voice assistance enabled. Say help with voice commands for options.',
-    'Voice assistance is enabled. How can I help you?');
+  if (voice.enabled) $('#voice-hint').textContent = 'Voice assistance enabled. Say what you would like to do.';
 };
+$('#voice-wake').onchange = event => setWakeListening(event.target.checked);
 $('#voice-interrupt').onclick = () => {
   voice.interrupt();
+  clearTranscript();
   $('#voice-hint').textContent = pendingInput ? 'Listening for your answer. Say cancel to cancel this input.' : 'Listening. What would you like to do?';
 };
-$('#voice-retry').onclick = () => { setVoiceEnabled(true); voice.interrupt(); };
-
-// Default to on for a new guest. Permission and audio autoplay are browser
-// controlled; saved "off" remains off until the user chooses to enable it.
-const initialVoiceEnabled = load('voice-enabled', true, value => typeof value === 'boolean');
-if (initialVoiceEnabled) voice.enable();
-else voice.disable();
-let welcomed = false;
-function firstInteraction(event) {
-  if (!event.isTrusted || welcomed) return;
-  welcomed = true;
-  document.removeEventListener('pointerdown', firstInteraction);
-  document.removeEventListener('keydown', firstInteraction);
-  // Let an off/interrupt control run first and remain quiet.
-  if (event.target.closest?.('#voice, #voice-interrupt, #voice-retry, #voice-help')) return;
-  setTimeout(() => {
-    if (!voice.enabled) return;
-    if (!['permission', 'unavailable'].includes($('#voice').dataset.state)) voice.enable();
-    if (currentPage === 'dashboard' && !dialog.open && !pendingInput) speak(welcome);
-  }, 0);
-}
-document.addEventListener('pointerdown', firstInteraction);
-document.addEventListener('keydown', firstInteraction);
+$('#voice-retry').onclick = () => {
+  if (voice.enabled) voice.enable();
+  else if (voice.wakeListening) voice.setWakeListening(true);
+  else setVoiceEnabled(true);
+};
+// A first visit is quiet and does not request microphone access. Saved explicit
+// opt-ins can resume listening; no greeting or response plays at startup.
+voice.disable();
+setWakeListening(load('voice-wake-enabled', false, value => typeof value === 'boolean'));
+if (load('voice-enabled', false, value => typeof value === 'boolean')) voice.enable();
