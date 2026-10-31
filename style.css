@@ -446,10 +446,16 @@ dialog::backdrop {
   padding: 15px 18px;
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 18px;
   background: #fff;
 }
 .ai-panel > div { flex: 1; min-width: 0; }
+.ai-panel > .ai-actions { flex: 0 0 auto; display: flex; flex-direction: column; align-items: flex-start; gap: 10px; }
+.ai-connection-help { flex-basis: 100%; border-top: 1px solid var(--border); padding-top: 12px; font-size: 12px; line-height: 1.7; }
+.ai-connection-help summary { cursor: pointer; font-weight: 600; }
+.ai-connection-help p { margin: 10px 0; }
+.ai-connection-help a { text-decoration: underline; }
 .ai-panel strong { font-size: 12px; }
 .ai-panel p { margin: 4px 0; font-size: 12px; color: #596c56; }
 .ai-panel small { display: block; font-size: 11px; line-height: 1.6; color: #687565; }

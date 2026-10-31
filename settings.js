@@ -56,7 +56,10 @@
       <label class="setting-row">Reduce animation<input type="checkbox" id="reduce-motion" ${preferences.motion ? 'checked' : ''}></label>
       <p class="fine-print">Reading preferences vary. This option uses a familiar font, more space between letters, and a more open line height.</p>
       <h3>AI and privacy</h3>
-      <label class="setting-row">Use AI when connected<input type="checkbox" id="settings-ai" ${window.CareAI?.enabled ? 'checked' : ''} ${window.CareAI?.available ? '' : 'disabled'}></label>
+      <label class="setting-row">Use AI when connected<input type="checkbox" id="settings-ai" aria-describedby="settings-ai-status" ${window.CareAI?.enabled ? 'checked' : ''}></label>
+      <p id="settings-ai-status" class="fine-print" role="status"></p>
+      <button id="settings-ai-retry" class="secondary" type="button">Check connection</button>
+      <details id="settings-ai-connection-help" class="ai-connection-help" hidden><summary>AI connection help</summary><p id="settings-ai-connection-guidance"></p><p>For a local copy, run <code>npm start</code> from the project folder and open <a href="http://localhost:3000">http://localhost:3000</a>.</p><p>The site owner must copy <code>.env.example</code> to <code>.env</code>, fill in <code>OPENAI_API_KEY</code>, and restart the server. Then choose <strong>Check connection</strong>.</p></details>
       <p class="fine-print">Connected AI receives text you submit and relevant profile details. You can choose local tools instead. See the Privacy policy for details.</p>
       <button class="primary" id="save-access">Save preferences</button>
       <button class="secondary danger" id="reset-data" type="button">Clear my data from this device</button>`);
@@ -70,11 +73,21 @@
       engine.speak('This is how your care guidance will sound.');
       engine.setSpeechOptions({ voiceURI: preferences.voiceURI, rate: preferences.rate });
     };
+    $('#settings-ai').onchange = event => {
+      if (event.target.checked && !window.CareAI?.available) {
+        event.target.checked = false;
+        void window.CareAI?.connect();
+      } else {
+        // Keep a staged settings choice when connection status is refreshed.
+        event.target.dataset.aiEdited = 'true';
+      }
+    };
+    window.CareAI?.render();
     $('#save-access').onclick = () => {
       const wantsVoice = $('#tts').checked;
       const wantsWake = $('#wake-setting').checked;
       const wantsAI = $('#settings-ai').checked;
-      const canChooseAI = !$('#settings-ai').disabled;
+      const canChooseAI = !$('#settings-ai').disabled && $('#settings-ai').dataset.aiEdited === 'true';
       Object.assign(preferences, {
         large: $('#large').checked, contrast: $('#contrast').checked,
         dyslexia: $('#dyslexia').checked, motion: $('#reduce-motion').checked,

@@ -151,7 +151,7 @@ async function run() {
       if (/\.(?:css|js)(?:\?|$)/.test(response.url()) && !response.ok()) failedAssets.push(`${response.status()} ${response.url()}`);
     });
     await page.goto(server.baseURL);
-    await page.waitForFunction(() => document.querySelector('#ai-enabled').disabled);
+    await page.waitForFunction(() => window.CareAI && !window.CareAI.checking);
     const presentation = await page.evaluate(() => ({
       background: getComputedStyle(document.body).backgroundColor,
       sidebar: getComputedStyle(document.querySelector('.sidebar')).position,
@@ -166,7 +166,7 @@ async function run() {
     assert.equal(await page.evaluate(() => window.__mockVoice.instances.length), 0, 'First visit must not access microphone');
     assert.equal(await page.evaluate(() => window.__mockVoice.spoken.length), 0, 'First visit must be quiet');
     assert.match(await page.locator('#ai-status').textContent(), /local tools|not connected/i);
-    assert.equal(await page.locator('#ai-enabled').isDisabled(), true);
+    assert.equal(await page.locator('#ai-enabled').isDisabled(), false);
 
     for (const name of ['decoder', 'specialists', 'plan', 'assistant', 'dashboard']) {
       await page.locator(`[data-page="${name}"]`).click();
@@ -307,7 +307,7 @@ async function run() {
       assert.equal(await page.locator('body').evaluate((body, name) => body.classList.contains(name), className), true);
     }
     await page.reload();
-    await page.waitForFunction(() => document.querySelector('#ai-enabled').disabled);
+    await page.waitForFunction(() => window.CareAI && !window.CareAI.checking);
     assert.equal(await page.evaluate(() => window.__mockVoice.instances.length), 0, 'Reload must not reactivate microphone');
     assert.equal(await page.evaluate(() => window.__mockVoice.spoken.length), 0, 'Reload must stay quiet');
     await page.locator('#accessibility').click();

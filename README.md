@@ -34,7 +34,7 @@ Keep the whole project folder together, including all JavaScript modules.
 Opening an HTML-only copy or a preview that does not serve the other files
 will lose the formatting and scripts. If you see an unformatted white page,
 confirm you are visiting the localhost URL, restart the server, and refresh
-with **Command + Shift + R** on a Mac. In Chrome's Network panel, `style.css?v=6`
+with **Command + Shift + R** on a Mac. In Chrome's Network panel, `style.css?v=7`
 should return `200` with a `text/css` content type.
 
 The stylesheet uses local system fonts and needs no Google Fonts request.
@@ -114,6 +114,12 @@ to export variables on every visit or switch AI on in the website. When the
 server has a configured key, the site connects AI automatically. A previously
 saved choice to turn AI off is respected; the AI control lets you opt out.
 Hosting environment variables take precedence over `.env` values.
+
+If **Use connected AI** cannot connect, it rechecks the server and opens
+**AI connection help** with the setup steps. **Check connection** retries without
+changing a saved choice to keep AI off. The control is temporarily disabled
+while checking, then becomes available again. Opening Settings during a check
+also updates its AI control when the check finishes.
 
 A real API key must come from the server operator's OpenAI account; the app
 cannot create one automatically. Without a key, or if AI fails, the site uses
@@ -197,6 +203,7 @@ Chromium browser:
 npm run test:browser
 npm run test:browser:ai
 npm run test:browser:assistant
+npm run test:browser:ai-connection
 ```
 
 If Playwright is installed outside this project, set `CARE_COMPASS_PLAYWRIGHT`
